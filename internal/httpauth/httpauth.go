@@ -88,8 +88,12 @@ func MatchRealmKeys(tok, wildcard, cn, global string) (string, bool) {
 // 供调用方在 VerifyBearer 之外自行做 realm 判定时复用。
 func BearerToken(r *http.Request) string {
 	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, bearerPrefix) {
-		return ""
+	if strings.HasPrefix(authz, bearerPrefix) {
+		if t := authz[len(bearerPrefix):]; t != "" {
+			return t
+		}
 	}
-	return authz[len(bearerPrefix):]
+	// x-api-key 回退：Anthropic 系客户端（Claude Code 等）用该头传密钥，
+	// 不走 Authorization: Bearer。空值不参与回退，避免空头覆盖有效 Bearer。
+	return r.Header.Get("x-api-key")
 }
