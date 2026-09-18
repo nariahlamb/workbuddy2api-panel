@@ -117,7 +117,7 @@ func Load(path string) (*Config, error) {
 	c := Default()
 	if path != "" {
 		if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
-			return nil, fmt.Errorf("config %s 是目录而非文件", path)
+			return nil, fmt.Errorf("config %s 是目录而非文件；请创建配置文件，例如：cp config.example.json %s", path, path)
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil { return nil, fmt.Errorf("read config: %w", err) }
