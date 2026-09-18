@@ -36,11 +36,6 @@ fi
 printf '%s\n' "$$" > "$SUPERVISOR_PID"
 trap 'rm -f "$PIDFILE" "$SUPERVISOR_PID"; exit 0' INT TERM EXIT
 
-# 网络已就绪（boot_completed 之后）：启动服务前刷新一次上游域名的静态
-# 解析，覆盖 post-fs-data 阶段网络未就绪导致的空解析。纯 Go 二进制只认
-# /etc/hosts（systemless overlay 即映射到该路径），见 post-fs-data.sh。
-sh "$MODDIR/post-fs-data.sh" >/dev/null 2>&1 || true
-
 # This is deliberately a normal idle TCP server: no foreground notification,
 # wakelock, alarm loop, or polling watchdog. The Go scheduler performs the
 # existing check-in, activity, travel, keepalive, blackcat, and balance jobs.
