@@ -158,12 +158,13 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	return merged, infos
 }
 
-// probeGlobalModels 发起一次 global 模型目录探测（v3-config-merge）：
-// /v3/config（主，IDE UA 完整能力版）与企业端点家族（/v2 → /console 兜底，补缺）
+// probeGlobalModels 发起一次 global 模型目录探测：
+// 企业端点家族（主路，真名目录：/v2 → /console 兜底）与 /v3/config（补缺，代号）
 // **并发**探测后并集合并。返回模型名列表（已合并、未再去重——去重在
 // fetchGlobalModelsOnce）、全字段 ModelInfo（对象形态；窄表为 nil）及 effort
-// 能力桶（supportedEfforts/defaultEffort，可为空）。合并口径：v3 条目为主
-// （credits 等字段以 v3 为准），企业端点只补 v3 缺失的模型 id；去重 key =
+// 能力桶（supportedEfforts/defaultEffort，可为空）。合并口径：企业端点家族条目
+// 为主（credits 等字段以家族为准），v3 只补家族缺失的模型 id——与 CN 侧
+// 「v3 为主」镜像，因两域命名方向相反（见下方合并处注释）；去重 key =
 // 模型 id，输出顺序稳定。两路全失败才返回错误（等价原「家族端点全非 2xx」
 // 负缓存语义）；单路失败降级为另一路结果 + warn 日志，互不拖累。
 func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelInfo, efforts map[string][]string, defaults map[string]string, err error) {
@@ -225,7 +226,16 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		names, infos, efforts, defaults = extractEfforts(v3.infos)
 		return names, infos, efforts, defaults, nil
 	}
-	// 两路皆成功：v3 为主、企业端点补缺合并（含 effort 桶合并，v3 权威）。
+	// 两路皆成功：企业端点家族为主、v3 补缺合并（含 effort 桶合并，家族权威）。
+	//
+	// Global 侧命名方向与 CN 恰好相反：/v3/config 只下发功能代号
+	// （default-model / fast-model / balanced-model / primary-model /
+	// deep-model / auto-chat / enhance-1.0 / nes-1.2 / Tencent-Cloud.genie-ide），
+	// 真名目录在企业端点家族（/v2/enterprises/personal/models 优先，回落到
+	// /console/...）——即 gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna /
+	// gemini-3.5-flash / deepseek-v4.1-flash / glm-5.3 / kimi-k3 / minimax-m3
+	// 等。沿用「v3 为主」会把真名当成补充项、代号占据主位，面板因此只见代号。
+	// 故此处与 CN 侧镜像：家族为主、v3 只补其缺失的 id。
 	v3Names, v3Infos, v3Efforts, v3Defaults := extractEfforts(v3.infos)
 	if len(v3Names) == 0 {
 		v3Names = v3.names
@@ -234,9 +244,9 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	if len(entNames) == 0 {
 		entNames = enterprise.names
 	}
-	names, infos = mergeGlobalCatalog(v3Names, v3Infos, entNames, entInfos)
-	efforts = mergeEffortBuckets(v3Efforts, entEfforts)
-	defaults = mergeEffortDefaults(v3Defaults, entDefaults)
+	names, infos = mergeGlobalCatalog(entNames, entInfos, v3Names, v3Infos)
+	efforts = mergeEffortBuckets(entEfforts, v3Efforts)
+	defaults = mergeEffortDefaults(entDefaults, v3Defaults)
 	return names, infos, efforts, defaults, nil
 }
 
