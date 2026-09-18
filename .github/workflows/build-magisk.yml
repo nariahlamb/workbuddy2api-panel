@@ -1,0 +1,76 @@
+name: Build Android Magisk module
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'magisk/**'
+      - '.github/workflows/build-magisk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -buildvcs=false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          check-latest: true
+
+      - name: Test host build
+        run: go test ./...
+
+      - name: Build Android arm64 binaries
+        run: |
+          set -eux
+          mkdir -p out/bin
+          export CGO_ENABLED=0 GOOS=android GOARCH=arm64
+          go build -trimpath -ldflags='-s -w' -o out/bin/wb2api ./cmd/server
+          go build -trimpath -ldflags='-s -w' -o out/bin/login ./cmd/login
+          go build -trimpath -ldflags='-s -w' -o out/bin/signin_bin ./cmd/signin
+          go build -trimpath -ldflags='-s -w' -o out/bin/credit ./cmd/credit
+          file out/bin/*
+
+      - name: Package Magisk ZIP
+        id: package
+        run: |
+          set -eux
+          VERSION="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then VERSION="dev-${GITHUB_SHA::7}"; fi
+          STAGE="dist/workbuddy2api-magisk-arm64-${VERSION}"
+          mkdir -p "$STAGE"
+          cp -a magisk/. "$STAGE/"
+          cp -a out/bin "$STAGE/bin"
+          sed -i "s/^version=.*/version=${VERSION}/" "$STAGE/module.prop"
+          sed -i "s/^versionCode=.*/versionCode=${GITHUB_RUN_NUMBER}/" "$STAGE/module.prop"
+          (cd "$STAGE" && zip -qr "../workbuddy2api-magisk-arm64-${VERSION}.zip" .)
+          sha256sum "dist/workbuddy2api-magisk-arm64-${VERSION}.zip" > "dist/workbuddy2api-magisk-arm64-${VERSION}.zip.sha256"
+          echo "archive=dist/workbuddy2api-magisk-arm64-${VERSION}.zip" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbuddy2api-magisk-arm64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.sha256

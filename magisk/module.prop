@@ -1,0 +1,6 @@
+id=workbuddy2api
+name=WorkBuddy2API Panel
+version=0.1.0
+versionCode=1
+author=workbuddy2api-panel contributors
+description=Native arm64 WorkBuddy2API gateway with local Web panel and scheduled tasks.
