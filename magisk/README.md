@@ -30,6 +30,17 @@ The module defaults to `127.0.0.1:7863`, so it is reachable only from this phone
 
 The native binary is an idle HTTP listener. It takes no WakeLock and has no APK foreground-service overhead. It retains the upstream scheduler, including check-in, activity reporting, cat travel, token keepalive, blackcat tasks, streak bonus / school tasks, and periodic balance refresh. The runner uses `TZ=Asia/Shanghai`, matching the upstream task calendar. Android deep sleep can defer any userspace timer; after the CPU resumes the process continues normally, but exact wall-clock task execution is not guaranteed by Android.
 
+## Verified on real hardware
+
+The arm64 binaries in this module were cross-compiled and then executed directly on an Android arm64 device (root shell), not just built in CI:
+
+- `go test ./...` passes on the branch, including `TestLoadConfigPathIsDirectory`.
+- All four binaries are `ELF 64-bit LSB pie executable, ARM aarch64, interpreter /system/bin/linker64, stripped`.
+- Launching `bin/wb2api` with `WB2A_ANDROID_MODULE=1` generated `config.json` on first start with `"listen": "127.0.0.1:7863"` and a random `api_key`, and the log confirmed every scheduled task was enabled (check-in `[9 21]`, travel `[9 21]`, activity `[10]`, keepalive `[22]`, blackcat `[23]`, balance refresh every 5m).
+- `curl http://127.0.0.1:7863/panel/` returned HTTP 200 on the device.
+
+Not yet verified on hardware: `service.sh` late-start execution after a real Magisk install and a reboot, and behavior across a long deep-sleep cycle. Those require flashing the ZIP on a device with Magisk installed.
+
 ## Diagnostics
 
 ```sh
