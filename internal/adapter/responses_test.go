@@ -374,3 +374,119 @@ func TestResponsesStreamTypedToolCalls(t *testing.T) {
 		t.Fatalf("typed tool_calls dropped in stream:\n%s", out)
 	}
 }
+
+// TestResponsesEventsNestResponseObject 回归：response.created / in_progress /
+// completed 三个事件的 response 对象必须嵌套在 "response" 键下。
+// 平铺（顶层直接 id/status/output）会让客户端按 data.response.output 取结果时
+// 拿不到数据，进而判定流异常并主动断开——真机上表现为「用几个工具就断」。
+func TestResponsesEventsNestResponseObject(t *testing.T) {
+	c := NewResponsesStreamConverter("m")
+	out := c.Feed(`{"choices":[{"delta":{"content":"hi"}}]}`)
+	out += c.Finish()
+
+	for _, ev := range []string{"response.created", "response.in_progress", "response.completed"} {
+		if !eventHasResponseKey(t, out, ev) {
+			t.Fatalf("event %s must nest its payload under \"response\"", ev)
+		}
+	}
+}
+
+// eventHasResponseKey 检查指定事件的数据帧里存在顶层 "response" 键。
+func eventHasResponseKey(t *testing.T, stream, eventName string) bool {
+	t.Helper()
+	// 找到事件行，取紧随其后的 data 帧
+	idx := 0
+	for {
+		i := indexFrom(stream, "event: "+eventName, idx)
+		if i < 0 {
+			t.Fatalf("event %s not found in stream", eventName)
+		}
+		rest := stream[i:]
+		nl := indexFrom(rest, "\n", 0)
+		if nl < 0 {
+			return false
+		}
+		line := rest[nl+1:]
+		if !hasPrefix(line, "data: ") {
+			idx = i + 1
+			continue
+		}
+		line = line[len("data: "):]
+		line = line[:indexFrom(line, "\n", 0)]
+		var obj map[string]any
+		if json.Unmarshal([]byte(line), &obj) != nil {
+			return false
+		}
+		_, ok := obj["response"]
+		return ok
+	}
+}
+
+func indexFrom(s, sub string, from int) int {
+	if from >= len(s) {
+		return -1
+	}
+	i := 0
+	for j := from; j+len(sub) <= len(s); j++ {
+		if s[j:j+len(sub)] == sub {
+			i = j
+			return i
+		}
+	}
+	return -1
+}
+
+func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
+
+// TestResponsesConvertDeveloperRole 回归：developer role 必须映射为 system。
+func TestResponsesConvertDeveloperRole(t *testing.T) {
+	body := `{"model":"m","input":[
+		{"role":"developer","content":"be nice"},
+		{"role":"user","content":"hi"}]}`
+	out, _, err := ResponsesToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var chat map[string]any
+	json.Unmarshal(out, &chat)
+	msgs, _ := chat["messages"].([]any)
+	m0, _ := msgs[0].(map[string]any)
+	if m0["role"] != "system" {
+		t.Fatalf("developer must map to system, got %v", m0["role"])
+	}
+	if contains(string(out), `"developer"`) {
+		t.Fatalf("developer role must not reach upstream: %s", out)
+	}
+}
+
+// TestResponsesAssistantTextMergedWithToolCalls 回归：assistant 正文与其
+// function_call 必须合并成一条 assistant 消息（chat 协议要求 tool_calls 挂在
+// 发起调用的那条 assistant 消息上）。
+func TestResponsesAssistantTextMergedWithToolCalls(t *testing.T) {
+	body := `{"model":"m","input":[
+		{"role":"user","content":"weather?"},
+		{"role":"assistant","content":"let me check"},
+		{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_1","output":"sunny"}]}`
+	out, _, err := ResponsesToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var chat map[string]any
+	json.Unmarshal(out, &chat)
+	msgs, _ := chat["messages"].([]any)
+	// 期望：user / assistant(text+tool_calls) / tool —— 共 3 条
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %s", len(msgs), out)
+	}
+	a, _ := msgs[1].(map[string]any)
+	if a["role"] != "assistant" {
+		t.Fatalf("msg[1] should be assistant: %v", a["role"])
+	}
+	if a["content"] != "let me check" {
+		t.Fatalf("assistant text lost: %v", a["content"])
+	}
+	if _, ok := a["tool_calls"]; !ok {
+		t.Fatalf("tool_calls must attach to the assistant message: %v", a)
+	}
+}
