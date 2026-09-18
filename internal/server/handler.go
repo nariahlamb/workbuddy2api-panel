@@ -442,7 +442,11 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	}
 	dynamicModelsCache.RUnlock()
 
-	acct := h.cfg.Pool.Pick()
+	// 必须限定 CN realm：Pick() 不限域会在混合池里挑到 global 账号，
+	// 使 CN 目录请求打到国际站 v3/config（www.workbuddy.ai），
+	// 拿到的是国际站功能代号目录（default-model/fast-model/balanced-model 等）
+	// 而非 CN 真名目录（deepseek-v4.1-flash/glm-5.3 等）。
+	acct := h.cfg.Pool.PickExcludingForRealm(nil, "", "cn")
 	if acct == nil {
 		return nil
 	}
