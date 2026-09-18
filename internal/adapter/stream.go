@@ -72,8 +72,11 @@ func (c *ResponsesStreamConverter) Feed(payload string) string {
 		if v, ok := chunk["created"].(float64); ok {
 			c.createdAt = int64(v)
 		}
-		out.WriteString(c.event("response.created", c.responseObject("in_progress", nil)))
-		out.WriteString(c.event("response.in_progress", c.responseObject("in_progress", nil)))
+		// 官方（及参考实现）把 response 对象嵌套在 "response" 键下，
+		// 客户端按 data.response.output 取最终结果——平铺会让它取不到而判流异常。
+		wrapped := map[string]any{"response": c.responseObject("in_progress", nil)}
+		out.WriteString(c.event("response.created", wrapped))
+		out.WriteString(c.event("response.in_progress", wrapped))
 	}
 	if u, ok := chunk["usage"].(map[string]any); ok {
 		c.usage = u
@@ -239,7 +242,18 @@ func (c *ResponsesStreamConverter) Finish() string {
 	if !c.created {
 		// 空流兜底：至少给出 created，客户端不会卡死等首帧。
 		c.created = true
-		out.WriteString(c.event("response.created", c.responseObject("in_progress", nil)))
+		out.WriteString(c.event("response.created",
+			map[string]any{"response": c.responseObject("in_progress", nil)}))
+	}
+
+	// reasoning_summary_text.done：参考实现会在收尾时补发这个事件，
+	// 缺了它部分客户端会认为 reasoning 段落没有正常结束。
+	if c.reasoningAdded {
+		out.WriteString(c.event("response.reasoning_summary_text.done", map[string]any{
+			"output_index":  0,
+			"summary_index": 0,
+			"text":          c.reasoning.String(),
+		}))
 	}
 
 	idx := c.messageOutputIndex()
@@ -276,7 +290,7 @@ func (c *ResponsesStreamConverter) Finish() string {
 	}
 	obj := c.responseObject(status, c.usage)
 	obj["output"] = c.finalOutput()
-	out.WriteString(c.event("response.completed", obj))
+	out.WriteString(c.event("response.completed", map[string]any{"response": obj}))
 
 	return out.String()
 }

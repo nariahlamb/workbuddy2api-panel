@@ -158,31 +158,50 @@ func convertInput(raw json.RawMessage) ([]any, error) {
 		return nil, fmt.Errorf("input must be a string or an array: %w", err)
 	}
 
+	// out 是已确定的 messages。pendingText / pendingCalls 承载「正在拼装的
+	// assistant turn」：Responses 把 assistant 正文与它发起的 function_call 拆成
+	// 两个 item，而 chat 协议要求它们合并挂在同一条 assistant 消息上
+	// （tool_calls 字段属于发起调用的那条 assistant 消息）。
 	var out []any
-	var pendingToolCalls []any
+	pendingText := ""
+	hasPendingText := false
+	var pendingCalls []any
 
-	flushToolCalls := func() {
-		if len(pendingToolCalls) > 0 {
-			out = append(out, map[string]any{
-				"role":       "assistant",
-				"content":    nil,
-				"tool_calls": pendingToolCalls,
-			})
-			pendingToolCalls = nil
+	flush := func() {
+		if !hasPendingText && len(pendingCalls) == 0 {
+			return
 		}
+		msg := map[string]any{"role": "assistant", "content": pendingText}
+		if len(pendingCalls) > 0 {
+			msg["tool_calls"] = pendingCalls
+			// 有工具调用时 content 允许为空字符串，与 chat 协议一致。
+		}
+		out = append(out, msg)
+		pendingText = ""
+		hasPendingText = false
+		pendingCalls = nil
 	}
 
 	for _, item := range items {
 		typ, _ := item["type"].(string)
+		role, _ := item["role"].(string)
 
 		if typ == "function_call" {
 			name, _ := item["name"].(string)
 			callID, _ := item["call_id"].(string)
+			if callID == "" {
+				if id, ok := item["id"].(string); ok {
+					callID = id
+				}
+			}
+			if callID == "" {
+				callID = NewID("call_")
+			}
 			args, _ := item["arguments"].(string)
 			if args == "" {
 				args = "{}"
 			}
-			pendingToolCalls = append(pendingToolCalls, map[string]any{
+			pendingCalls = append(pendingCalls, map[string]any{
 				"id":   callID,
 				"type": "function",
 				"function": map[string]any{
@@ -194,7 +213,7 @@ func convertInput(raw json.RawMessage) ([]any, error) {
 		}
 
 		if typ == "function_call_output" {
-			flushToolCalls()
+			flush()
 			callID, _ := item["call_id"].(string)
 			out = append(out, map[string]any{
 				"role":         "tool",
@@ -209,19 +228,34 @@ func convertInput(raw json.RawMessage) ([]any, error) {
 			continue
 		}
 
-		role, _ := item["role"].(string)
+		// assistant 正文：暂存，等待可能的同名 function_call 合并。
+		if role == "assistant" {
+			flush()
+			content, err := convertContent(item["content"])
+			if err != nil {
+				return nil, err
+			}
+			pendingText, _ = content.(string)
+			hasPendingText = true
+			continue
+		}
+
 		if role == "" {
 			continue
 		}
-		flushToolCalls()
+		flush()
 
 		content, err := convertContent(item["content"])
 		if err != nil {
 			return nil, err
 		}
+		// Responses 用 developer 替代 system；上游 chat 协议只认 system。
+		if role == "developer" {
+			role = "system"
+		}
 		out = append(out, map[string]any{"role": role, "content": content})
 	}
-	flushToolCalls()
+	flush()
 
 	return out, nil
 }
