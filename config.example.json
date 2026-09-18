@@ -1,6 +1,10 @@
 {
   "listen": ":7863",
   "api_key": "test_key",
+  "api_keys": {
+    "cn": "",
+    "global": ""
+  },
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {
@@ -11,11 +15,23 @@
     "soft_rate_max": "2h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
-    "blackcat_hours": [23],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
+    "blackcat_hours": [
+      23
+    ],
     "checkin_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,

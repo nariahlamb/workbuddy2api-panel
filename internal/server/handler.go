@@ -159,11 +159,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+		snap := h.loadLive()
+		// realm 专用密钥（api_keys.cn / api_keys.global）与全通配 api_key 一次判定：
+		// 命中 realm 密钥时把该 realm 注入 context，后续端点据此收窄可见范围；
+		// 全通配命中得到 realm=""（不限制），即改造前的既有行为。
+		realm, ok := snap.MatchKey(httpauth.BearerToken(r))
+		if !ok {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
-		next(w, r)
+		next(w, withRealm(r, realm))
 	}
 }
 
@@ -246,9 +251,13 @@ const (
 // models 返回模型列表：纯动态（缓存 1h），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	scope, _ := realmFrom(r)
+	list := h.modelList()
+	// realm 专用密钥只返回本域模型：cn key 看不到 global: 条目，反之亦然。
+	// 全通配 scope="" 时 filterModelsByRealm 原样返回，零行为变化。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   filterModelsByRealm(list, scope),
 	})
 }
 
@@ -494,6 +503,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+
+	// realm 专用密钥的范围校验：持 cn key 不得调用 global: 模型，反之亦然。
+	// 放在解析之后、任何上游调用之前——不打上游、不罚账号、不轮转账号，
+	// 纯客户端授权问题（403）。全通配 scope="" 时恒通过，零回归。
+	if scope, ok := realmFrom(r); ok && !realmAllows(scope, realm) {
+		writeOpenAIError(w, http.StatusForbidden, "realm_not_allowed",
+			fmt.Sprintf("该 API key 仅限 %s 模型，请求的是 %s:%s", scope, realm, bareModel))
+		return
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
