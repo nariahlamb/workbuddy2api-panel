@@ -870,7 +870,20 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
+	// 动态模型目录是纯上游产出（无静态兜底），因此这里必须给假上游：真实
+	// upstream.New() 会去打线上 /v3/config，在 CI（无有效凭证）拿到 401 后
+	// 模型列表为空，断言必然失败——测试不能依赖真实网络。
+	up := newFakeUpstream(t, func(authz string) (status int, body string, isStream bool) {
+		return 200, `{"code":0,"data":{"models":[` +
+			`{"id":"glm-5.2","maxInputTokens":131072,"maxOutputTokens":16384},` +
+			`{"id":"glm-5.3","maxInputTokens":131072,"maxOutputTokens":16384},` +
+			`{"id":"gpt-5.5","maxInputTokens":131072,"maxOutputTokens":16384},` +
+			`{"id":"kimi-k3","maxInputTokens":131072,"maxOutputTokens":16384},` +
+			`{"id":"deepseek-v4.1-flash","maxInputTokens":131072,"maxOutputTokens":16384},` +
+			`{"id":"gemini-3.5-flash","maxInputTokens":131072,"maxOutputTokens":16384}` +
+			`],"agents":[{"name":"cli","models":["glm-5.2","glm-5.3","gpt-5.5","kimi-k3","deepseek-v4.1-flash","gemini-3.5-flash"]}]}}`, false
+	})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: up})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
