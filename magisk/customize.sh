@@ -17,6 +17,7 @@ ui_print "- Installing native service"
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/runner.sh" 0 0 0755
+set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/bin/wb2api" 0 0 0755
 [ -f "$MODPATH/bin/login" ] && set_perm "$MODPATH/bin/login" 0 0 0755
 [ -f "$MODPATH/bin/signin_bin" ] && set_perm "$MODPATH/bin/signin_bin" 0 0 0755
