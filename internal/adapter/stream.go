@@ -169,8 +169,10 @@ func (c *ResponsesStreamConverter) messageOutputIndex() int {
 
 // feedToolCalls 处理工具调用增量 → function_call_arguments.delta。
 func (c *ResponsesStreamConverter) feedToolCalls(out *strings.Builder, delta map[string]any) {
-	arr, ok := delta["tool_calls"].([]any)
-	if !ok {
+	// 同 responses_response.go：聚合器与 JSON 反序列化产出的切片静态类型不同，
+	// 只认 []any 会让流式工具调用被静默丢弃。
+	arr := toAnySlice(delta["tool_calls"])
+	if arr == nil {
 		return
 	}
 	for _, it := range arr {

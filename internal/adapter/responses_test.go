@@ -300,3 +300,77 @@ func TestResponsesStreamConverterEmptyStream(t *testing.T) {
 		t.Fatalf("empty stream must still bracket the stream:\n%s", out)
 	}
 }
+
+// TestChatToResponsesTypedToolCalls 回归：聚合器（upstream.Aggregate）产出的
+// tool_calls 静态类型是 []map[string]any，而 JSON 反序列化产出 []any。
+// 只认 []any 会让工具调用被静默丢弃——表现为 Responses 输出空 message，
+// 客户端以为模型没调工具（此 bug 曾在真机真实上游上复现）。
+func TestChatToResponsesTypedToolCalls(t *testing.T) {
+	chat := map[string]any{
+		"choices": []any{map[string]any{
+			"finish_reason": "tool_calls",
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": "",
+				// 关键：[]map[string]any，不是 []any
+				"tool_calls": []map[string]any{
+					{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "get_weather",
+							"arguments": `{"city":"SH"}`,
+						},
+					},
+				},
+			},
+		}},
+	}
+	resp := ChatToResponses(chat)
+	out, _ := resp["output"].([]any)
+	var found bool
+	for _, o := range out {
+		m, _ := o.(map[string]any)
+		if m["type"] == "function_call" {
+			found = true
+			if m["name"] != "get_weather" {
+				t.Fatalf("name mismatch: %v", m["name"])
+			}
+			if m["arguments"] != `{"city":"SH"}` {
+				t.Fatalf("arguments mismatch: %v", m["arguments"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("typed []map[string]any tool_calls was dropped; output=%v", out)
+	}
+}
+
+// TestResponsesStreamTypedToolCalls 同一回归的流式版本。
+func TestResponsesStreamTypedToolCalls(t *testing.T) {
+	c := NewResponsesStreamConverter("m")
+	// 模拟聚合器形态：delta.tool_calls 为 []map[string]any
+	chunk := map[string]any{
+		"choices": []any{map[string]any{
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{
+					{
+						"index": 0,
+						"id":    "call_1",
+						"type":  "function",
+						"function": map[string]any{
+							"name":      "get_weather",
+							"arguments": `{"city"`,
+						},
+					},
+				},
+			},
+		}},
+	}
+	payload, _ := json.Marshal(chunk)
+	out := c.Feed(string(payload))
+	if !contains(out, "event: response.output_item.added") ||
+		!contains(out, "function_call") {
+		t.Fatalf("typed tool_calls dropped in stream:\n%s", out)
+	}
+}

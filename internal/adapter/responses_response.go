@@ -106,26 +106,27 @@ func extractChatMessage(chat map[string]any) (content, reasoning string, toolCal
 		reasoning = s
 	}
 
-	if arr, ok := msg["tool_calls"].([]any); ok {
-		for _, it := range arr {
-			m, _ := it.(map[string]any)
-			if m == nil {
-				continue
-			}
-			fn, _ := m["function"].(map[string]any)
-			name, args := "", ""
-			if fn != nil {
-				name, _ = fn["name"].(string)
-				args, _ = fn["arguments"].(string)
-			}
-			id, _ := m["id"].(string)
-			if id == "" {
-				id = NewID("call_")
-			}
-			toolCalls = append(toolCalls, map[string]any{
-				"id": id, "name": name, "arguments": args,
-			})
+	// tool_calls 的静态类型取决于来源：聚合器（upstream.Aggregate）产出
+	// []map[string]any，而 JSON 反序列化产出 []any。两种都要认，否则工具调用
+	// 会在 Responses 侧被静默丢弃（表现为「模型没调工具」而不是报错）。
+	for _, it := range toAnySlice(msg["tool_calls"]) {
+		m, _ := it.(map[string]any)
+		if m == nil {
+			continue
 		}
+		fn, _ := m["function"].(map[string]any)
+		name, args := "", ""
+		if fn != nil {
+			name, _ = fn["name"].(string)
+			args, _ = fn["arguments"].(string)
+		}
+		id, _ := m["id"].(string)
+		if id == "" {
+			id = NewID("call_")
+		}
+		toolCalls = append(toolCalls, map[string]any{
+			"id": id, "name": name, "arguments": args,
+		})
 	}
 	return content, reasoning, toolCalls
 }
@@ -201,3 +202,19 @@ func finishReason(chat map[string]any) string {
 }
 
 var _ = fmt.Sprintf
+
+// toAnySlice 把 []any 与 []map[string]any 统一成可 range 的切片。
+// 两种形态分别来自 JSON 反序列化与聚合器内部构造，不能只认其一。
+func toAnySlice(v any) []any {
+	switch t := v.(type) {
+	case []any:
+		return t
+	case []map[string]any:
+		out := make([]any, 0, len(t))
+		for _, m := range t {
+			out = append(out, m)
+		}
+		return out
+	}
+	return nil
+}
