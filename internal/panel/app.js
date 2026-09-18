@@ -314,41 +314,56 @@ function outCell(m, pr) {
   return '<td class="num" title="' + esc(tip) + '"><span style="color:var(--ink-3)">?</span><div class="note">未测出' + stale + '</div></td>';
 }
 
+// 渲染单个域的模型表（列表可空：给出占位说明，不留空白表）。
+function renderModelRows(list, probes, probeOf, tbody, emptyMsg) {
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(emptyMsg) + '</div></td></tr>';
+    return 0;
+  }
+  tbody.innerHTML = list.map(m => {
+    const eff = (m.supported_efforts || []).slice();
+    if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
+    const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
+      : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
+    const caps = [];
+    if (m.is_default) caps.push('<span class="tag ok">默认</span>');
+    if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
+    if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
+    if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
+    const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
+    const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
+    return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+      '<td class="num">' + (m.credits ? esc(m.credits) : '—') + '</td>' +
+      '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
+      '<td class="efs" style="white-space:normal">' + effs + '</td>' +
+      '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
+      outCell(m, probeOf(m.id)) + '</tr>';
+  }).join('');
+  return list.length;
+}
+
 async function loadModels() {
-  const tb = $('mdBody');
-  tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
+  const tbCN = $('mdBodyCN'), tbGL = $('mdBodyGL');
+  tbCN.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
+  tbGL.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
     // 探测数据是可选增强：拉取失败不影响模型列表本身
     const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
-    const list = d.models || [];
-    if (!list.length) { tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>'; return; }
+    const cn = d.models || [];
+    const gl = d.global || [];
     const probes = pr.probes || {};
     const probeKeys = Object.keys(probes);
     const probeOf = id => probes[id] || probes[probeKeys.find(k => k.endsWith(':' + id))];
-    tb.innerHTML = list.map(m => {
-      const eff = (m.supported_efforts || []).slice();
-      if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
-      const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
-        : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
-      // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
-      const caps = [];
-      if (m.is_default) caps.push('<span class="tag ok">默认</span>');
-      if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
-      if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
-      if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
-      const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
-      const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-      return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
-        '<td class="num">' + (m.credits ? esc(m.credits) : '—') + '</td>' +
-        '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
-        '<td class="efs" style="white-space:normal">' + effs + '</td>' +
-        '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
-        outCell(m, probeOf(m.id)) + '</tr>';
-    }).join('');
-    const hit = list.filter(m => probeOf(m.id)).length;
-    $('mdNote').textContent = list.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
+
+    const nCN = renderModelRows(cn, probes, probeOf, tbCN, d.cn_error ? ('国内模型拉取失败：' + d.cn_error) : '上游未返回国内模型');
+    const nGL = renderModelRows(gl, probes, probeOf, tbGL, d.global_ok ? '上游未返回国际版模型' : '无国际版账号：请在「账号池」添加国际版账号后重试');
+
+    $('mdCNSummary').textContent = '国内 · ' + nCN + ' 个模型';
+    $('mdGLSummary').textContent = '国际 · ' + nGL + ' 个模型';
+    $('mdNote').textContent = '国内 ' + nCN + ' · 国际 ' + nGL;
   } catch (e) {
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
+    const msg = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
+    tbCN.innerHTML = msg; tbGL.innerHTML = msg;
   }
 }
 $('btnModels').onclick = loadModels;
@@ -392,6 +407,7 @@ $('btnLogPin').onclick = () => {
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'],
+  api_keys_cn: ['api_keys', 'cn'], api_keys_global: ['api_keys', 'global'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
@@ -419,6 +435,14 @@ function put(obj, path, val) {
   o[path[path.length - 1]] = val;
 }
 
+// 密钥字段：绝不把明文回填进 DOM。已设置时置空 + 占位符「已设置（留空保持不变）」，
+// 提交时留空即跳过（collectConfig 天然跳过空值），因此不会用空串把现有密钥抹掉。
+const SECRET_FIELDS = {
+  api_key: '全通配',
+  api_keys_cn: '国内专用',
+  api_keys_global: '国际专用',
+};
+
 async function loadConfig() {
   try {
     const d = await api('config');
@@ -432,6 +456,15 @@ async function loadConfig() {
       if (el.type === 'checkbox') el.checked = !!v;
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
+      if (name in SECRET_FIELDS) {
+        // 已设置 → 不回显明文，改占位符提示；未设置 → 空占位符。
+        const set = v != null && String(v) !== '';
+        el.value = '';
+        el.placeholder = set ? '已设置（留空保持不变）' : '未设置（留空 = 不启用）';
+        el.type = 'password';
+        const btn = el.parentElement && el.parentElement.querySelector('button.xs');
+        if (btn) btn.textContent = '显示';
+      }
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
     $('cfgNote').textContent = '';
@@ -481,12 +514,18 @@ function markDurationFields() {
 $('cfgForm').addEventListener('input', ev => {
   if (DURATION_FIELDS.includes(ev.target.name)) markDurationFields();
 });
-$('btnEye').onclick = () => {
-  const el = $('cfgKey');
-  const show = el.type === 'password';
-  el.type = show ? 'text' : 'password';
-  $('btnEye').textContent = show ? '隐藏' : '显示';
-};
+function bindEye(btnId, inputId) {
+  const btn = $(btnId), el = $(inputId);
+  if (!btn || !el) return;
+  btn.onclick = () => {
+    const show = el.type === 'password';
+    el.type = show ? 'text' : 'password';
+    btn.textContent = show ? '隐藏' : '显示';
+  };
+}
+bindEye('btnEye', 'cfgKey');
+bindEye('btnEyeCN', 'cfgKeyCN');
+bindEye('btnEyeGL', 'cfgKeyGL');
 $('btnCfgReload').onclick = loadConfig;
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();

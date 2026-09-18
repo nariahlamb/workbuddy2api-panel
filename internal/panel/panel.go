@@ -12,6 +12,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -243,56 +244,129 @@ func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 // 回答"该模型到底支持哪几档思考"。顺带刷新 client 的 effort 降级能力缓存。
 // 无可用账号 503（先添加账号）；上游失败 502。
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
-	acct := p.cfg.Pool.Pick()
-	if acct == nil {
+	// 双域模型列表：cn 与 global 分别查询（与 /v1/models 的 modelList 同口径），
+	// 各自独立成败——一个域失败（无号 / 上游错）不影响另一个域照常展示。
+	// realm 字段标在每条上，前端据此拆成国内/国外两个列表。
+	cnModels, cnErr := p.collectCNModels()
+	globalModels, globalOK := p.collectGlobalModels()
+	if cnErr == errNoAccount && len(globalModels) == 0 {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"models":       cnModels,
+		"global":       globalModels,
+		"cn_error":     errString(cnErr),
+		"global_ok":    globalOK,
+		"cn_count":     len(cnModels),
+		"global_count": len(globalModels),
+	})
+}
+
+// errNoAccount 池中无可用 CN 账号的哨兵错误。
+var errNoAccount = errors.New("no account")
+
+// errString 把可选错误转成前端可直接展示的字符串（nil → 空串）。
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// collectCNModels 拉取 CN 域模型（含 context/effort 富字段），与 /v1/models 同口径。
+func (p *Panel) collectCNModels() ([]map[string]any, error) {
+	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
+		return nil, errNoAccount // 未装配（测试/裸用）：按无账号处理，端点给明确提示
+	}
+	acct := p.cfg.Pool.Pick()
+	if acct == nil {
+		return nil, errNoAccount
+	}
 	infos, err := p.cfg.Upstream.FetchModels(acct)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "fetch models: "+err.Error())
-		return
+		return nil, err
 	}
 	out := make([]map[string]any, 0, len(infos))
 	for _, mi := range infos {
-		entry := map[string]any{
-			"id":                   mi.ID,
-			"name":                 mi.Name,
-			"default_effort":       mi.DefaultEffort,
-			"supported_efforts":    mi.Efforts,
-			"can_disable_thinking": mi.CanDisableThinking,
-			"supports_reasoning":   mi.SupportsReasoning,
-			"supports_images":      mi.SupportsImages,
-			"credits":              mi.Credits,
-			"description":          mi.Description,
-			"tags":                 mi.Tags,
-			"vendor":               mi.Vendor,
-			"is_default":           mi.IsDefault,
-			"supports_tool_call":   mi.SupportsToolCall,
-			"only_reasoning":       mi.OnlyReasoning,
-			"reasoning_effort":     mi.ReasoningEffort,
-			"reasoning_summary":    mi.ReasoningSummary,
+		out = append(out, p.modelEntry(mi, "cn", "cn:", mi.Efforts, mi.DefaultEffort))
+	}
+	return out, nil
+}
+
+// collectGlobalModels 探测 global 域模型（无 global 账号 → 空列表 + false）。
+// 与 handler.modelList 的 global 分支共享同一份探测缓存，不二次打上游。
+func (p *Panel) collectGlobalModels() ([]map[string]any, bool) {
+	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
+		return nil, false
+	}
+	acct := p.cfg.Pool.PickExcludingForRealm(nil, "", "global")
+	if acct == nil {
+		return nil, false
+	}
+	names := p.cfg.Upstream.FetchGlobalModels(acct)
+	if len(names) == 0 {
+		return nil, false
+	}
+	infos := map[string]upstream.ModelInfo{}
+	for _, mi := range p.cfg.Upstream.FetchGlobalModelInfos(acct) {
+		infos[mi.ID] = mi
+	}
+	efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
+	out := make([]map[string]any, 0, len(names))
+	for _, id := range names {
+		mi, ok := infos[id]
+		if !ok {
+			mi = upstream.ModelInfo{ID: id} // 窄表/无元数据：裸 ID 输出，不编造字段
 		}
-		if mi.MaxAllowedSize > 0 {
-			entry["max_allowed_size"] = mi.MaxAllowedSize
-		}
-		// 与 /v1/models 同口径：context_length / max_output_tokens 走四级查找链
-		// （上游动态值 → 静态知识表 → model.json → models.dev → 1M 兜底），
-		// effort 档位走 EffortListing（远端权威 ∪ CN 静态兜底表）——面板展示的
-		// 数值即客户端实际拿到的数值，两侧不再漂移。
-		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, p.cfg.Upstream.HTTP)
-		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, p.cfg.Upstream.HTTP); ok {
-			entry["max_output_tokens"] = mo
-		}
-		if efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
-			entry["supported_efforts"] = efforts
-			if def != "" {
-				entry["default_effort"] = def
-			}
-		}
+		entry := p.modelEntry(mi, "global", "global:", efforts[id], defaults[id])
+		entry["id"] = id // 面板展示用裸名；前缀仅用于 /v1/models
 		out = append(out, entry)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+	return out, true
+}
+
+// modelEntry 把 ModelInfo 组装为面板条目（与 /v1/models 同口径的四级查找链 +
+// effort 权威覆盖）。efforts/defaultEffort 为该域探测下的 effort 桶（可为空，
+// 此时回落到 mi 自带值——CN 静态兜底表在 EffortListing 内部生效）。
+func (p *Panel) modelEntry(mi upstream.ModelInfo, realm, prefix string, efforts []string, defaultEffort string) map[string]any {
+	entry := map[string]any{
+		"id":                   mi.ID,
+		"_id":                  prefix + mi.ID,
+		"realm":                realm,
+		"name":                 mi.Name,
+		"can_disable_thinking": mi.CanDisableThinking,
+		"supports_reasoning":   mi.SupportsReasoning,
+		"supports_images":      mi.SupportsImages,
+		"credits":              mi.Credits,
+		"description":          mi.Description,
+		"tags":                 mi.Tags,
+		"vendor":               mi.Vendor,
+		"is_default":           mi.IsDefault,
+		"supports_tool_call":   mi.SupportsToolCall,
+		"only_reasoning":       mi.OnlyReasoning,
+		"reasoning_effort":     mi.ReasoningEffort,
+		"reasoning_summary":    mi.ReasoningSummary,
+	}
+	if mi.MaxAllowedSize > 0 {
+		entry["max_allowed_size"] = mi.MaxAllowedSize
+	}
+	// HTTP client 四级查找链（model.json / models.dev）需要 client 做异步拉取；
+	// Upstream 未装配（测试/裸用）时退化为纯静态链（传 nil，函数内部已容错）。
+	var httpClient *http.Client
+	if p.cfg.Upstream != nil {
+		httpClient = p.cfg.Upstream.HTTP
+	}
+	entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, httpClient)
+	if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, httpClient); ok {
+		entry["max_output_tokens"] = mo
+	}
+	if effs, def := upstream.EffortListing(realm, mi.ID, efforts, defaultEffort); effs != nil {
+		entry["supported_efforts"] = effs
+		entry["default_effort"] = def
+	}
+	return entry
 }
 
 // modelProbes 返回模型输出上限的探测结果（scripts/probe_max_tokens.py --panel-out

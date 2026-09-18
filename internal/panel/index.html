@@ -540,10 +540,26 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="mdNote">实时查询上游</span>
           <button class="xs" id="btnModels">重新获取</button>
         </header>
+        <div class="pad">
+          <div class="note" id="mdCNSummary" style="margin-bottom:6px">国内</div>
+        </div>
         <div class="tbl-wrap">
         <table class="acc md">
           <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
-          <tbody id="mdBody"></tbody>
+          <tbody id="mdBodyCN"></tbody>
+        </table>
+        </div>
+      </div>
+      <div class="box">
+        <header>
+          <h3>国际版模型 <span class="hint">global 域探测结果（企业端点为主，与国内目录不同源）</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="mdGLSummary">国际</span>
+        </header>
+        <div class="tbl-wrap">
+        <table class="acc md">
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
+          <tbody id="mdBodyGL"></tbody>
         </table>
         </div>
       </div>
@@ -646,10 +662,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">监听地址</span>
                 <input name="listen" placeholder=":7863">
                 <span class="hint">改动需重启进程</span></label>
-              <label class="fld"><span class="lb">API 密钥</span>
+              <label class="fld"><span class="lb">API 密钥（全通配）</span>
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
                 <button type="button" class="xs" id="btnEye">显示</button></div>
-                <span class="hint">立即生效（含面板自身）</span></label>
+                <span class="hint">全通配：可访问两个域的模型。留空 = 不鉴权</span></label>
+            </div>
+            <div class="hr"></div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">国内专用密钥（api_keys.cn）</span>
+                <div class="inline"><input name="api_keys_cn" id="cfgKeyCN" type="password" placeholder="留空 = 不启用独立国内key">
+                <button type="button" class="xs" id="btnEyeCN">显示</button></div>
+                <span class="hint">持此 key 只能看到并调用国内模型（cn:）</span></label>
+              <label class="fld"><span class="lb">国际专用密钥（api_keys.global）</span>
+                <div class="inline"><input name="api_keys_global" id="cfgKeyGL" type="password" placeholder="留空 = 不启用独立国际key">
+                <button type="button" class="xs" id="btnEyeGL">显示</button></div>
+                <span class="hint">持此 key 只能看到并调用国际版模型（global:）</span></label>
             </div>
           </div>
         </div>
