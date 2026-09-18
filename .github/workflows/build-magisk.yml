@@ -31,16 +31,47 @@ jobs:
       - name: Test host build
         run: go test ./...
 
-      - name: Build Android arm64 binaries
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Build Android arm64 binaries (CGO, system resolver)
         run: |
           set -eux
           mkdir -p out/bin
-          export CGO_ENABLED=0 GOOS=android GOARCH=arm64
-          go build -trimpath -ldflags='-s -w' -o out/bin/wb2api ./cmd/server
-          go build -trimpath -ldflags='-s -w' -o out/bin/login ./cmd/login
+
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          API=24
+          export CC="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
+          export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
+          export AR="$TOOLCHAIN/bin/llvm-ar"
+          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          [ -x "$CC" ] || { echo "CC not found: $CC"; ls "$TOOLCHAIN/bin" | head -50; exit 1; }
+
+          # CGO_ENABLED=1 让 Go 走系统 getaddrinfo（Android netd / VPN 动态 DNS），
+          # 而不是纯 Go 解析器去读 /etc/resolv.conf（Android 上该文件不存在，
+          # 导致 "lookup ... on [::1]:53: connection refused"）。
+          # 不再使用 netgo / 纯静态解析，也不再写任何 hosts / resolv.conf。
+          export CGO_ENABLED=1 GOOS=android GOARCH=arm64
+
+          go build -trimpath -ldflags='-s -w' -o out/bin/wb2api     ./cmd/server
+          go build -trimpath -ldflags='-s -w' -o out/bin/login      ./cmd/login
           go build -trimpath -ldflags='-s -w' -o out/bin/signin_bin ./cmd/signin
-          go build -trimpath -ldflags='-s -w' -o out/bin/credit ./cmd/credit
-          file out/bin/*
+          go build -trimpath -ldflags='-s -w' -o out/bin/credit     ./cmd/credit
+
+          echo "=== 校验：动态链接且依赖 libc（证明 CGO 生效）==="
+          for f in out/bin/*; do
+            echo "--- $f"
+            file "$f"
+            "$TOOLCHAIN/bin/llvm-readelf" -d "$f" | grep -i needed || {
+              echo "ERROR: $f 未链接 libc，CGO 未生效"; exit 1; }
+          done
 
       - name: Package Magisk ZIP
         id: package
