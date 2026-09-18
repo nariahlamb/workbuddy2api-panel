@@ -266,17 +266,29 @@ func TestResponsesStreamConverterToolCalls(t *testing.T) {
 	_ = f3
 }
 
-// TestResponsesStreamConverterReasoning 验证思考走 reasoning_summary 事件，
-// 且正文 output_index 顺延为 1（不与 reasoning 抢 0）。
+// TestResponsesStreamConverterReasoning 验证思考走 reasoning_summary 事件。
+//
+// 对齐参考实现（:8788）：reasoning 不建独立 output item（不发 output_item.added/done），
+// summary 事件固定 output_index=0，正文 message 也用 0。
 func TestResponsesStreamConverterReasoning(t *testing.T) {
 	c := NewResponsesStreamConverter("m")
 	f1 := c.Feed(`{"choices":[{"delta":{"reasoning_content":"hmm"}}]}`)
 	if !contains(f1, "event: response.reasoning_summary_text.delta") {
 		t.Fatalf("reasoning delta missing:\n%s", f1)
 	}
+	if contains(f1, "event: response.output_item.added") {
+		t.Fatalf("reasoning must not emit its own output_item.added:\n%s", f1)
+	}
+	if !contains(f1, `"summary_index":0`) {
+		t.Fatalf("reasoning summary_index should be 0:\n%s", f1)
+	}
 	f2 := c.Feed(`{"choices":[{"delta":{"content":"answer"}}]}`)
-	if !contains(f2, `"output_index":1`) {
-		t.Fatalf("text output_index should be 1 after reasoning:\n%s", f2)
+	if !contains(f2, `"output_index":0`) {
+		t.Fatalf("message output_index should be 0:\n%s", f2)
+	}
+	fin := c.Finish()
+	if contains(fin, "output_item.done") && !contains(fin, `"type":"message"`) {
+		t.Fatalf("output_item.done must be the message item:\n%s", fin)
 	}
 }
 

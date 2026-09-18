@@ -68,6 +68,9 @@ func (s *responsesSink) Stream(w http.ResponseWriter, rc io.Reader) error {
 	w.WriteHeader(http.StatusOK)
 
 	conv := adapter.NewResponsesStreamConverter(s.model)
+	// done 标记：收到上游 [DONE] 并下发 response.completed 后置位。
+	// 用于区分「结束前的真上游故障」与「结束后的客户端断连回声」。
+	done := false
 
 	// 复用 upstream 的 SSE 帧读取器语义：按行读，取 "data: " 载荷。
 	// 这里自行解析而不复用 upstream.StreamHint，因为输出形态完全不同
@@ -79,12 +82,31 @@ func (s *responsesSink) Stream(w http.ResponseWriter, rc io.Reader) error {
 			break
 		}
 		if err != nil {
-			// 上游读取错误：已开流无法改状态码，下发一个 error 事件后结束，
-			// 避免客户端无限等待。
-			writeResponsesErrorEvent(w, fl, err)
-			return err
+			// 上游读取错误：已开流无法改状态码。
+			//
+			// 若已经下发过 response.completed，说明本轮协议层已完整结束，
+			// 客户端拿到结果后会自行关闭连接——此时上游读到的
+			// "context canceled" 是客户端断开的回声，不是网关故障。
+			// 这种收尾后的读取错误必须静默（既不记 error 日志，也不再补发
+			// error 事件），否则会在 completed 之后多出一个 error 帧，
+			// 让客户端把一次成功的对话判成失败。
+			if !done {
+				writeResponsesErrorEvent(w, fl, err)
+				return err
+			}
+			return nil
 		}
-		if out := conv.Feed(payload); out != "" {
+		var out string
+		if payload == "[DONE]" {
+			// 上游显式结束：本次翻译收尾，且必须立即停止读取。
+			// 继续读会让「结束后」的 socket 状态（连接被对端回收/取消）
+			// 变成一个假的上游错误。
+			out = conv.Finish()
+			done = true
+		} else {
+			out = conv.Feed(payload)
+		}
+		if out != "" {
 			if _, werr := io.WriteString(w, out); werr != nil {
 				return werr
 			}
@@ -92,8 +114,11 @@ func (s *responsesSink) Stream(w http.ResponseWriter, rc io.Reader) error {
 				fl.Flush()
 			}
 		}
+		if done {
+			break
+		}
 	}
-	// 收尾事件。
+	// 收尾事件（上游未发 [DONE] 就已 EOF 的情况）。
 	if out := conv.Finish(); out != "" {
 		io.WriteString(w, out)
 	}
