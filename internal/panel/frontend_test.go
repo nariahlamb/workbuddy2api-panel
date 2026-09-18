@@ -56,3 +56,37 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 		rest = rest[end:]
 	}
 }
+
+// TestModelsViewDualLists 「模型与档位」必须是国内/国际两个独立列表：
+// 两个 tbody（#mdBodyCN / #mdBodyGL）与两个域小结节点必须都在，否则前端会在
+// 渲染时分域失败（单表时代只能显示国内 16 个模型——本次修复的诉求之一）。
+func TestModelsViewDualLists(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	for _, id := range []string{`id="mdBodyCN"`, `id="mdBodyGL"`, `id="mdCNSummary"`, `id="mdGLSummary"`} {
+		if !strings.Contains(body, id) {
+			t.Fatalf("index.html missing %s (双域模型列表未生效)", id)
+		}
+	}
+	if strings.Contains(body, `id="mdBody"`) {
+		t.Fatal("index.html still has legacy single-table #mdBody")
+	}
+}
+
+// TestConfigViewRealmKeyFields 配置页必须提供国内/国际两把专用密钥输入框，
+// 否则「显式设置分 key」在 UI 上无处落地（后端已支持但面板无入口）。
+func TestConfigViewRealmKeyFields(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	for _, id := range []string{`name="api_keys_cn"`, `name="api_keys_global"`, `id="btnEyeCN"`, `id="btnEyeGL"`} {
+		if !strings.Contains(body, id) {
+			t.Fatalf("index.html missing %s (分 key 表单项未生效)", id)
+		}
+	}
+}
