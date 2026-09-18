@@ -1127,7 +1127,22 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if enterprise.err != nil {
 		log.Printf("WARN: [upstream] fetch models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
 	}
-	out := mergeModelInfos(v3.infos, enterprise.infos)
+	// CN 侧命名方向：/v3/config 下发真名目录（deepseek-v4.1-flash、glm-5.3 等
+	// 30 条完整字段：name/credits/descriptionZh/supportedEfforts/输入输出上限），
+	// 企业端点只下发功能代号（deep-model / fast-model / balanced-model /
+	// primary-model / auto-chat / enhance-1.0 / o4-mini / default-model）。
+	// 两组 id 不同名，合并会把代号当作「v3 缺失项」补进列表，面板因此真名与
+	// 代号混杂（issue：cn:deep-model 与 cn:deepseek-v4.1-flash 并列）。
+	// 故 v3 成功即只用 v3（权威目录）；企业端点仅在 v3 失败时降级兜底 ——
+	// 宁可有代号可读，也不返回空列表。
+	var out []ModelInfo
+	switch {
+	case v3.err == nil && len(v3.infos) > 0:
+		out = v3.infos
+	case enterprise.err == nil && len(enterprise.infos) > 0:
+		out = enterprise.infos
+		log.Printf("WARN: [upstream] fetch models: 降级使用企业端点目录（功能代号），v3/config 不可用")
+	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
