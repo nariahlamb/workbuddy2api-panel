@@ -144,6 +144,8 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.maxBodyBytes.Store(cfg.MaxBodyBytes)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Responses 协议：请求翻译为 chat 后复用同一执行链，响应翻译回 Responses。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -474,7 +476,32 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// chatSink 决定 chat 执行链成功时如何把上游结果写给客户端。
+// 这是 Responses 等其它协议复用 chat 执行链的接缝：
+//   - ChatSink 原样透传/聚合并按 OpenAI 格式写出（既有行为，零回归）；
+//   - ResponsesSink 把同一份上游字节流翻译成 Responses 事件流或 Response 对象。
+//
+// 注意：实现必须自行处理「已开流后不可再改状态码」的约束（上游 200 即视为成功）。
+type chatSink interface {
+	// ClientStreams 报告客户端期望的响应形态：true=流式（走 Stream），
+	// false=一次性 JSON（走 Aggregate）。与"上游是否流式"解耦。
+	ClientStreams() bool
+	// Stream 流式写出。rc 为上游 SSE 字节流。
+	Stream(w http.ResponseWriter, rc io.Reader) error
+	// Aggregate 非流式写出。rc 为上游 SSE 字节流。
+	Aggregate(w http.ResponseWriter, rc io.Reader) error
+}
+
+// chatCompletions 是 /v1/chat/completions 的入口（OpenAI Chat 协议）。
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	h.chatCompletionsBody(w, r, nil)
+}
+
+// chatCompletionsBody 承载 chat 执行链主逻辑。sink 为 nil 时走原生 OpenAI 写出
+// （既有行为）；非 nil 时由 sink 决定成功路径的写出形态。
+// overrideBody 非 nil 时用它替代请求体（Responses 翻译后的 chat 请求体），
+// 此时 rawBody 仅用于日志与提示词判定的原始形态。
+func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, sink chatSink) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
@@ -498,6 +525,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+	// 协议适配路径（sink 非 nil）下，"上游是否流式"与"客户端是否要流式"必须分开：
+	//   - 上游恒流式（ChatStreamContext 只产出 SSE，非流式响应由 sink 聚合后写出）；
+	//   - 客户端形态由 sink 决定，此处以 it 覆盖 peek.Stream。
+	// 若沿用 body 里的 stream（Responses 翻译后恒为 true），非流式请求会被误判为
+	// 流式并直接给客户端写事件流，而客户端在等一个 JSON 对象。
+	if sink != nil {
+		peek.Stream = sink.ClientStreams()
+	}
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
@@ -823,12 +858,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
-			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
-			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
-			// 组装请求上下文做判定）。
-			_ = upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
-				return h.hintContext(bareModel, reqHasImage)
-			}))
+			if sink != nil {
+				// 协议适配路径：上游字节流交给 sink 翻译（Responses 事件流）。
+				// 记账仍读同一份 stats，token/credit 口径与 chat 路径完全一致。
+				_ = sink.Stream(w, stats)
+			} else {
+				// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
+				// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
+				// 组装请求上下文做判定）。
+				_ = upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
+					return h.hintContext(bareModel, reqHasImage)
+				}))
+			}
 			recordAttempt(acct.UID, stats.Usage(), attemptStarted)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
@@ -840,6 +881,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			rc.Close()
+			return
+		}
+		if sink != nil {
+			// 协议适配路径：由 sink 自行聚合上游 SSE 并按其协议写出。
+			// 记账口径由 sink 内的 Aggregate 产出（与 chat 聚合同源）。
+			stats := newChatStatsReaderSince(rc, st.start)
+			_ = sink.Aggregate(w, stats)
+			rc.Close()
+			recordAttempt(acct.UID, stats.Usage(), attemptStarted)
+			st.toks, _ = stats.Tokens()
+			st.status = http.StatusOK
+			if credit, ok := stats.Credit(); ok {
+				if total, tok := stats.TotalTokens(); tok && total > 0 {
+					h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
+				}
+			}
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
