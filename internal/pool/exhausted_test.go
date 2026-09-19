@@ -124,3 +124,38 @@ func TestExhaustedNotCountedAsCooling(t *testing.T) {
 		t.Fatal("Status.Cooling 不应为 true")
 	}
 }
+
+// TestAllExhaustedForRealm 锁定「仅因余额耗尽不可服务」的判定边界。
+func TestAllExhaustedForRealm(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "g1"})
+	p.Add(&auth.Auth{UID: "g2"})
+	p.SetCredits("g1", 0, 350)
+	p.SetCredits("g2", 0, 350)
+	if !p.AllExhaustedForRealm("") {
+		t.Fatal("两个号都已确认耗尽 → true")
+	}
+	// 存在非耗尽号 → false（真实原因不是余额，可能是冷却，不该报成余额问题）。
+	p.SetCredits("g2", 10, 350)
+	if p.AllExhaustedForRealm("") {
+		t.Fatal("存在非耗尽号 → false")
+	}
+	// 余额未知（creditsTotal==0）不算耗尽 → false。
+	p2 := New("")
+	p2.Add(&auth.Auth{UID: "n1"})
+	if p2.AllExhaustedForRealm("") {
+		t.Fatal("余额未知不得判为耗尽 → false")
+	}
+	// 空池 → false（没有任何号，不是"余额耗尽"这个原因）。
+	if New("").AllExhaustedForRealm("") {
+		t.Fatal("空池 → false")
+	}
+	// 禁用号不参与判定：全部禁用时 seen=false → false（交由既有 disabled 口径处理）。
+	p3 := New("")
+	p3.Add(&auth.Auth{UID: "d1"})
+	p3.SetCredits("d1", 0, 350)
+	p3.Disable("d1", "session dead")
+	if p3.AllExhaustedForRealm("") {
+		t.Fatal("全禁用 → false（禁用是另一种不可用原因）")
+	}
+}

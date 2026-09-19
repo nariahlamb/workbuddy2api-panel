@@ -732,6 +732,13 @@ func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, si
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 		}
 		if acct == nil {
+			// 记录"为什么没号"供末端区分措辞：域内号全因余额耗尽而不可用时，
+			// 笼统的 no_healthy_account（"暂时不可用"）会掩盖真实原因（需充值/等
+			// 签到）。修复前该信息靠"选中→撞 402→透传上游原文"间接暴露，选号层
+			// 排除耗尽号后必须显式补齐（见 AllExhaustedForRealm 注释）。
+			if lastErr == nil && h.cfg.Pool.AllExhaustedForRealm(realm) {
+				lastErr = errAllCreditsExhausted
+			}
 			st.status = http.StatusServiceUnavailable
 			break
 		}
@@ -964,6 +971,13 @@ func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, si
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrHardCredit:
+			// 余额耗尽：可能是上游 402/14018 透传（带原文），也可能是本地选号
+			// 排除耗尽号后的哨兵（无原文）。两者对客户端的动作一致——充值或等
+			// 签到恢复——故给同一可操作措辞；有上游原文时下方原文优先覆盖。
+			status = http.StatusServiceUnavailable
+			code = "insufficient_credits"
+			msg = "all accounts in this realm have exhausted their credits; top up or wait for the daily check-in to restore quota"
 		case upstream.ErrWafBlock:
 			if h.wafIP.active(realm) {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
@@ -981,6 +995,11 @@ func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, si
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
 }
+
+// errAllCreditsExhausted 本地调度哨兵：选号返 nil 且该 realm 的号**全因余额耗尽**
+// 不可用。它不是上游错误（没有上游原文可透传），语义上最接近 ErrHardCredit
+// （等签到/充值恢复），据此在末端给出可操作的措辞而非笼统的"暂时不可用"。
+var errAllCreditsExhausted = &upstream.Error{Kind: upstream.ErrHardCredit, Status: http.StatusServiceUnavailable, Msg: ""}
 
 // promptTooLongMessage 11115 透传 message：上游 body 原文（含真实 token 数/
 // 上限值/requestId，客户端自行排查）；空 body 兜底为可读分类短文案（不编造原文）。

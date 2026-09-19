@@ -104,3 +104,33 @@ func TestChatWafRotateStopsOnIPLevelBlock(t *testing.T) {
 		t.Fatalf("末端应给 IP 级拦截措辞，got=%s", rec.Body)
 	}
 }
+
+// TestChatAllExhaustedGivesActionableError 域内号全因余额耗尽时，末端必须给可操作
+// 措辞（充值/等签到）而非笼统的 "temporarily unavailable"。选号层排除耗尽号后，
+// 修复前"选中→撞 402→透传原文"的间接信息必须显式补齐，否则是可见的信息回退。
+func TestChatAllExhaustedGivesActionableError(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		calls++
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.SetCredits("u1", 0, 350) // 已确认耗尽
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if calls != 0 {
+		t.Fatalf("耗尽号不应被打上游，calls=%d", calls)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "insufficient_credits") {
+		t.Fatalf("应给 insufficient_credits 而非笼统 no_healthy_account，got=%s", body)
+	}
+	if strings.Contains(body, "no_healthy_account") {
+		t.Fatalf("不应落到笼统措辞，got=%s", body)
+	}
+}
