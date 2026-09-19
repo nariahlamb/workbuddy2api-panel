@@ -1093,6 +1093,20 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 // 版本号需随上游 IDE 发版跟进：UAn 版本过旧时该端点可能同样返回精简目录。
 const codeBuddyIDEUA = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
 
+// codeBuddyCLIUA CLI 段式 UA。**仅 global 侧使用**：/v3/config 的目录内容随 UA
+// 分叉，且两域方向相反（实测同一账号同一时刻）：
+//   - CN   ：IDE UA 22 条真名目录（deepseek-v4.1-flash…），CLI UA 37 条
+//     但混入补全/预览代号，故 CN 保持 IDE UA。
+//   - global：IDE UA 只给 13 条**功能代号**（default-model/fast-model/
+//     auto-chat/o4-mini/enhance-1.0/nes-*/codewise-*），CLI UA 给 22 条**真名**
+//     目录（deepseek-v4.1-flash/gpt-6-astra/kimi-k2.8-preview/glm-5.3…）。
+//     故 global 必须用 CLI UA——否则面板只见代号，且真名型号（用户实际要用的
+//     deepseek-v4.1-flash 等）整体缺失。
+//
+// 目录内容全部来自服务端响应（含实时 credits 倍率与促销活动），随上游发版
+// 自动更新，客户端不内置任何静态型号表。
+const codeBuddyCLIUA = "WorkBuddy/1.0"
+
 // FetchModels 调上游动态模型接口（CN 侧；global 账号见 global_models.go 家族）。
 //
 // v3-config-merge：动态目录 = /v3/config（主，IDE UA 完整能力版）+ 企业端点
@@ -1270,7 +1284,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 // nonChatModel 规则剔除非对话条目（selected 会选模型报 code=11102）。
 // 失败返回错误（调用方降级为仅企业端点）。
 func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
-	byID, err := c.fetchV3ConfigModelMap(a)
+	byID, err := c.fetchV3ConfigModelMap(a, codeBuddyIDEUA)
 	if err != nil {
 		return nil, err
 	}
@@ -1332,9 +1346,14 @@ func v3ConfigDomain(a *auth.Auth, chatBase string) string {
 	return "copilot.tencent.com"
 }
 
-// fetchV3ConfigModelMap 拉官方 IDE 配置目录，按模型 id 建能力表。
-// 该端点对 UA 敏感：必须带 CodeBuddy/CodeBuddyIDE 版本，否则 400 code=12403。
-func (c *Client) fetchV3ConfigModelMap(a *auth.Auth) (map[string]ModelInfo, error) {
+// fetchV3ConfigModelMap 拉官方配置目录（/v3/config），按模型 id 建能力表。
+// 该端点对 UA 敏感且有两条必须能解析出版本号的形态（否则 400 code=12403）：
+// IDE 形态 codeBuddyIDEUA 与 CLI 形态 codeBuddyCLIUA——返回的目录内容不同，
+// 由调用方按 realm 选择（见 codeBuddyCLIUA 注释的 UA×realm 分叉表）。
+func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]ModelInfo, error) {
+	if ua == "" {
+		ua = codeBuddyIDEUA
+	}
 	req, err := http.NewRequest(http.MethodGet, c.chatBase(a)+"/v3/config", nil)
 	if err != nil {
 		return nil, err
@@ -1347,7 +1366,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth) (map[string]ModelInfo, erro
 	}
 	req.Header.Set("X-Domain", v3ConfigDomain(a, c.chatBase(a)))
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("User-Agent", codeBuddyIDEUA)
+	req.Header.Set("User-Agent", ua)
 	c.injectCodeBuddyRequest(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

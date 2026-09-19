@@ -1,12 +1,19 @@
-// global 模型目录探测：纯动态产出模型名及其窗口 / 能力元数据（v3-config-merge）。
+// global 模型目录探测：纯动态产出模型名及其窗口 / 能力元数据（CLI 目录为主）。
 //
-// 探测两路并发：/v3/config（主路，IDE UA 完整能力版）+ 企业端点家族
-// （/v2 → /console 补缺），并集 = v3 条目为主、企业端点补 v3 缺失的 id
-// （如 gpt-5.3-codex 只在 /v2 下发）。倍率字段（credits）虽随目录下发，但
-// 只透出展示，不注入 costTier、不参与选号。
+// 探测两路并发：/v3/config **CLI UA 形态**（主路，真名目录，见 codeBuddyCLIUA）
+// + 企业端点家族（/v2 → /console，只补主路缺失的 id，如 gpt-5.3-codex 只在
+// /v2 下发）。并集 = CLI 目录条目为主（credits 等字段权威），企业端点补缺。
+// 倍率字段（credits）虽随目录下发，但只透出展示，不注入 costTier、不参与选号。
+//
+// 为何 global 用 CLI UA 而非 IDE UA：IDE UA 只下发 13 条功能代号
+// （default-model / auto-chat / o4-mini / enhance-1.0 / nes-* / codewise-*），
+// 用户实际要用的真名型号（deepseek-v4.1-flash / gpt-6-astra / glm-5.3 /
+// kimi-k2.8-preview…）整体缺失；CLI UA 给 22 条真名目录。且 IDE 独有条目
+// 恰好全是自动挡与补全/图片类（用户明确不用），换用 CLI UA 亦免去维护黑名单。
 //
 // 纯动态：不再回落任何静态名单——拉不出目录即意味着该域上游不可用，
-// 假名单只会让客户端选到 11102 的模型（产品决策：无兜底）。
+// 假名单只会让客户端选到 11102 的模型（产品决策：无兜底）。目录内容全部来自
+// 服务端响应（含实时 credits 与促销），随上游发版自动更新，不内置型号表。
 package upstream
 
 import (
@@ -159,14 +166,14 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 }
 
 // probeGlobalModels 发起一次 global 模型目录探测：
-// 企业端点家族（主路，真名目录：/v2 → /console 兜底）与 /v3/config（补缺，代号）
-// **并发**探测后并集合并。返回模型名列表（已合并、未再去重——去重在
-// fetchGlobalModelsOnce）、全字段 ModelInfo（对象形态；窄表为 nil）及 effort
-// 能力桶（supportedEfforts/defaultEffort，可为空）。合并口径：企业端点家族条目
-// 为主（credits 等字段以家族为准），v3 只补家族缺失的模型 id——与 CN 侧
-// 「v3 为主」镜像，因两域命名方向相反（见下方合并处注释）；去重 key =
-// 模型 id，输出顺序稳定。两路全失败才返回错误（等价原「家族端点全非 2xx」
-// 负缓存语义）；单路失败降级为另一路结果 + warn 日志，互不拖累。
+// /v3/config（主路，**CLI UA 形态**，真名目录）与企业端点家族
+// （/v2 → /console 兜底，只补缺）**并发**探测后并集合并。返回模型名列表
+// （已合并、未再去重——去重在 fetchGlobalModelsOnce）、全字段 ModelInfo
+// （对象形态；窄表为 nil）及 effort 能力桶（supportedEfforts/defaultEffort，
+// 可为空）。合并口径：CLI 目录条目为主（credits/efforts 等字段以主路为准），
+// 企业端点只补主路缺失的模型 id（如 gpt-5.3-codex 仅在 /v2 下发）；去重 key =
+// 模型 id，输出顺序稳定。两路全失败才返回错误（负缓存语义）；单路失败降级为
+// 另一路结果 + warn 日志，互不拖累。
 func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelInfo, efforts map[string][]string, defaults map[string]string, err error) {
 	type probeResult struct {
 		names []string
@@ -176,22 +183,28 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	v3Ch := make(chan probeResult, 1)
 	enterpriseCh := make(chan probeResult, 1)
 	go func() {
-		// v3 主路：复用 IDE UA 版 /v3/config 探测（chatBase 已按 realm 切 global base）。
-		byID, perr := c.fetchV3ConfigModelMap(a)
+		// 主路：/v3/config **CLI UA** 形态（global 侧真名目录；IDE UA 只给代号）。
+		// chatBase 已按 realm 切 global base。
+		byID, perr := c.fetchV3ConfigModelMap(a, codeBuddyCLIUA)
 		if perr != nil {
 			v3Ch <- probeResult{err: perr}
 			return
 		}
-		ids := make([]string, 0, len(byID))
 		outInfos := make([]ModelInfo, 0, len(byID))
 		for _, mi := range byID {
 			if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
 				continue
 			}
-			ids = append(ids, mi.ID)
 			outInfos = append(outInfos, mi)
 		}
-		sort.Strings(ids) // map 迭代序随机，排序保输出稳定
+		// map 迭代序随机：先按 id 排序 infos，再由排序后的 infos 派生 names。
+		// 两者必须同序——mergeGlobalCatalog 的补充项顺序、以及 extractEfforts
+		// 从 infos 重建 names 的路径都依赖它，否则输出不稳定（测试会 flaky）。
+		sort.Slice(outInfos, func(i, j int) bool { return outInfos[i].ID < outInfos[j].ID })
+		ids := make([]string, 0, len(outInfos))
+		for _, mi := range outInfos {
+			ids = append(ids, mi.ID)
+		}
 		v3Ch <- probeResult{names: ids, infos: outInfos}
 	}()
 	go func() {
@@ -226,16 +239,14 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		names, infos, efforts, defaults = extractEfforts(v3.infos)
 		return names, infos, efforts, defaults, nil
 	}
-	// 两路皆成功：企业端点家族为主、v3 补缺合并（含 effort 桶合并，家族权威）。
+	// 两路皆成功：CLI 目录（主路）为主、企业端点补缺（含 effort 桶合并，主路权威）。
 	//
-	// Global 侧命名方向与 CN 恰好相反：/v3/config 只下发功能代号
-	// （default-model / fast-model / balanced-model / primary-model /
-	// deep-model / auto-chat / enhance-1.0 / nes-1.2 / Tencent-Cloud.genie-ide），
-	// 真名目录在企业端点家族（/v2/enterprises/personal/models 优先，回落到
-	// /console/...）——即 gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna /
-	// gemini-3.5-flash / deepseek-v4.1-flash / glm-5.3 / kimi-k3 / minimax-m3
-	// 等。沿用「v3 为主」会把真名当成补充项、代号占据主位，面板因此只见代号。
-	// 故此处与 CN 侧镜像：家族为主、v3 只补其缺失的 id。
+	// Global 侧 UA×端点分叉：/v3/config **CLI UA** 下发真名全量目录
+	// （deepseek-v4.1-flash / gpt-6-astra / glm-5.3 / kimi-k2.8-preview /
+	// gemini-3.5-flash / gpt-5.6-* 等 22 条，字段齐全含 credits 与
+	// supportedEfforts）；企业端点家族（/v2/enterprises/personal/models，
+	// /console 已废弃恒 500）给 18 条，两者差异仅 gpt-5.3-codex 为家族独有。
+	// 故主路取 CLI 目录、家族补其缺失 id（gpt-5.3-codex 不丢）。
 	v3Names, v3Infos, v3Efforts, v3Defaults := extractEfforts(v3.infos)
 	if len(v3Names) == 0 {
 		v3Names = v3.names
@@ -244,9 +255,9 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	if len(entNames) == 0 {
 		entNames = enterprise.names
 	}
-	names, infos = mergeGlobalCatalog(entNames, entInfos, v3Names, v3Infos)
-	efforts = mergeEffortBuckets(entEfforts, v3Efforts)
-	defaults = mergeEffortDefaults(entDefaults, v3Defaults)
+	names, infos = mergeGlobalCatalog(v3Names, v3Infos, entNames, entInfos)
+	efforts = mergeEffortBuckets(v3Efforts, entEfforts)
+	defaults = mergeEffortDefaults(v3Defaults, entDefaults)
 	return names, infos, efforts, defaults, nil
 }
 
