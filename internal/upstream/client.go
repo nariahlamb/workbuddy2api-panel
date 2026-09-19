@@ -229,6 +229,39 @@ const modelBlockMsgMarker = "service info not found"
 // （与 6004 条目的 "6004 model rate limit" reason 互不干扰）。
 const ModelBlockReason = "11102 model not available"
 
+// creditExhaustedCode 明确的「计费余额耗尽」业务 code。
+//
+// 为什么需要按 code 精确判定（2026-09-19 生产日志实证）：上游对国际账号在
+// status=429 下返回 `{"error":{"data":{"code":14018,"msg":"Credits exhausted. Please
+// visit the link below to purchase add-on packs and get more credits: ..."}}}`。
+// Classify 的 status==429 层先于 hardMarkers（该次序本身正确——429 body 高频携带
+// "quota exceeded"/"额度不足" 这类跨计费与限流两界的措辞，先判 hardMarkers 会把
+// 限流误归硬冷却、白扔号约 12h），代价是**无歧义的**余额耗尽也被降级成 ErrSoftRate
+// 只冷却 10 分钟：号是真没额度，10 分钟后回来必然再撞一次，形成循环。
+//
+// 故在 429 层**之前**只对精确 code 开口子：14018 的文案唯一指向「买加油包充值」，
+// 没有任何限流歧义（不像 "quota exceeded" 可能指速率配额），按 code 判定是权威的，
+// 与 11102/6004 同思路。这是"具体优先于宽泛"，不是推翻 429 层。
+const creditExhaustedCode = "14018"
+
+// IsCreditExhausted 报告 body 是否携带明确的计费余额耗尽业务码（14018）。
+// 只看 code 字段形态（JSON 空格容差，与 IsModelRateLimit/IsModelBlocked 同口径），
+// 不做状态码约束——该码语义与状态码无关（观测到 429，但 402/200 同码也应照此判）。
+func IsCreditExhausted(body string) bool {
+	if body == "" || !strings.Contains(body, creditExhaustedCode) {
+		return false // 轻量预检：绝大多数响应零分配短路
+	}
+	return reCreditExhausted.MatchString(strings.ToLower(body))
+}
+
+// reCreditExhausted 14018 的精确 code 形态（JSON 空格/引号容差 + **数字右边界**）。
+//
+// 为什么不用共享的 codeMarker：那是朴素子串匹配，`"code":140180` 会命中 `"code":14018`
+// 前缀（同为 code 判定，11102/11133/11135 也有此特性，但它们的 code 无更长同前缀
+// 现实形态，风险为零；本处测试直接暴露了它）。code 字段后必然是 `,` `}` `]` 或串尾，
+// 以此为右边界即可消除前缀误命中。
+var reCreditExhausted = regexp.MustCompile(`"code"\s*:\s*"?` + creditExhaustedCode + `"?(?:\s*[,}\]]|$)`)
+
 // IsModelBlocked 报告 body 是否是「该后端无此模型」(11102) 的确定性答复。
 //
 // 只比对 code/msg 等独立字段，绝不做整段文本子串匹配：错误体还带 requestId 等字段，
@@ -401,6 +434,8 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     限流可指数退避等自愈，账号级故障等不来）。11140 的 model 级限流变体
 //     （rate-limiting 文案）因 marker 不含该文案而天然落到 softRateMarkers 层，
 //     不受影响。
+//     3b. 14018 —— 精确计费余额耗尽码（IsCreditExhausted），先于 status==429：
+//     无歧义的"买加油包"文案，按 code 判定权威（见 creditExhaustedCode）。
 //  4. status==429 —— 限流状态码兜底（先于 hardMarkers）：429 body 高频携带
 //     "quota exceeded"/"额度不足" 等跨计费/限流两界的措辞，hardMarkers 先判会把
 //     限流误归 ErrHardCredit 硬冷却到次日 04:00，白扔号约 12h。状态码是比关键词
@@ -441,6 +476,13 @@ func Classify(status int, body string) ErrKind {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			return ErrAccountFault
 		}
+	}
+	// 精确余额耗尽码先于 status==429（见 creditExhaustedCode 注释）：14018 是
+	// 无歧义的"买加油包"计费耗尽，被 429 层降级成 10 分钟软冷却会让真没额度的号
+	// 循环回到池里（2026-09-19 日志实证）。这是「具体码优先于宽泛状态码」，
+	// 不改变 429 层的既有语义（其余 429 响应仍走下面）。
+	if IsCreditExhausted(body) {
+		return ErrHardCredit
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/
 	// "额度不足" 等跨计费/限流两界的措辞，hardMarkers 先判会把限流误归

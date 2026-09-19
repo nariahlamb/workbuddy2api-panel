@@ -240,6 +240,44 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 	return mc, true
 }
 
+// exhausted 报告账号是否**已确认**计费余额耗尽（选号时应排除）。
+//
+// 判定必须区分「已确认耗尽」与「余额未知」，否则会误伤新号：
+//   - creditsTotal > 0 && credits <= 0 → 余额曾被上游权威读过（creditsTotal 是
+//     UserResource 聚合的总额度），且当前余量已归零 → 确认耗尽，选了必撞 402/14018。
+//   - creditsTotal == 0 → 从未成功读过余额（新加入的号、或刷新一直失败）。此时
+//     credits 恒 0 不代表没额度，**不得**按耗尽处理（否则新号永远选不上，池子
+//     空转 503）。
+//
+// 为什么放在选号层而不是只靠冷却：2026-09-19 生产日志实证——三个 global 号余额
+// 归零（credits=0/credits_total=350）却 `disabled=false`，只吃了 10 分钟「429 软冷却」
+// 就重新参选，选中又撞一次余额耗尽，形成循环。选号层的余额闸门是**自愈**的：
+// 余额一旦刷回 >0（充值/签到解冻）立刻恢复可选，无需等任何冷却到期，也不依赖
+// 上游先回一次 402 把号打进 CoolHard。
+//
+// 与冷却的关系：本谓词是**并集**而非替代——账号可能同时处于冷却期，两者任一命中
+// 即不可选（与 healthy 的或门语义一致）。CoolHard（余额耗尽冷却到次日 04:00）
+// 仍照常由 applyErrorPolicy 记账，本谓词只是把「尚未吃到期硬冷却」的空窗补齐。
+func (e *entry) exhausted() bool {
+	return e.creditsTotal > 0 && e.credits <= 0
+}
+
+// usable 报告账号是否**可被选中**：账号级健康（未禁用/未冷却/未熔断/未降权）且未
+// 确认余额耗尽。这是选号、可用集合、探活三处的统一口径——否则会出现「/healthz
+// 报服务可用、chat 却因全池耗尽返 503」的矛盾。
+//
+// 刻意**不**把 exhausted 折进 healthy()：healthy 是账号级状态机的权威判定
+// （disabled/until/breakerUntil/degradeUntil），/status 的 cooling 计数与
+// statusOf 的冷却字段都依赖它的语义。耗尽号并非「冷却中」（无到期时间），折进去
+// 会让它被计数成 cooling，运维看到的标签就是错的。故分层：healthy 管状态机，
+// usable 管「能否选用」。
+func (e *entry) usable(now time.Time) bool { return e.healthy(now) && !e.exhausted() }
+
+// usableForModel 同 usable，但按模型口径（6004 模型级冷却豁免照常生效）。
+func (e *entry) usableForModel(now time.Time, model string) bool {
+	return e.healthyForModel(now, model) && !e.exhausted()
+}
+
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
 // 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
 // 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。

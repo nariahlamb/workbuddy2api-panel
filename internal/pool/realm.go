@@ -17,8 +17,8 @@ func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if !e.healthy(now) {
-			continue
+		if !e.usable(now) {
+			continue // usable = healthy 且未确认余额耗尽（见 entry.usable）
 		}
 		if p.inFlightFull(e) {
 			continue
@@ -40,8 +40,8 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if !e.healthyForModel(now, model) {
-			continue
+		if !e.usableForModel(now, model) {
+			continue // 同 AvailableUIDsForRealm：耗尽号不进可用集合
 		}
 		if p.inFlightFull(e) {
 			continue

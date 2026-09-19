@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -106,9 +107,11 @@ type Handler struct {
 	cfg     Config
 	mux     *http.ServeMux
 	degrade degradeGate
-	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
-	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
-	wafIP wafIPGate
+	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：按 realm 分档，短窗多号
+	// WAF 403 → 该域入口直接拒绝 + 轮转终止（不放大请求量）。分档理由见 wafip.go
+	// 文件头：实测同一出口 IP 上 global 被拦、CN 全通，单闸门会跨域误伤。
+	// 进程内状态、重启清零。
+	wafIP wafIPGates
 	// maxBodyBytes 请求体上限的运行期值（cfg.MaxBodyBytes 的原子镜像）。
 	// 面板在线改 server.max_body_mb 时经 SetMaxBodyBytes 热生效，无需重启
 	// （issue #17：改了配置却静默不生效，用户仍被 8MB 413 拦截）。
@@ -556,6 +559,25 @@ func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, si
 	st := newChatStat(time.Now(), body, peek.Stream)
 	defer st.done()
 
+	// WAF IP 级拦截入口 fail-fast（wafip.go）：本 realm 的出口 IP 已被上游 WAF
+	// 判定拦截时，**在打上游之前**直接拒绝。理由（2026-09-19 生产日志实证）：
+	// 01:33:21 闸门激活后，01:33:24/30/39 三个**新请求**仍各撞一次上游才被拦——
+	// 已在封禁窗口内的请求连"撞一次"都是白费，还向已被判定为风控目标的出口 IP
+	// 继续加量（轮转上限内还会放大到 MaxRotate 次）。故止在入口。
+	//   - 按 realm 分档：只拒绝命中域（global 被拦不影响 CN，实测两域不对称）；
+	//   - 窗口到期自然解除：本检查只在激活期生效，无需主动探活，解除后第一个
+	//     请求即恢复探测；
+	//   - 回 503 + Retry-After：客户端据此知道该等多久而非盲目重试。账号侧零动作
+	//     （没打上游、没罚号、没轮转）。
+	if d := h.wafIP.retryAfter(realm); d > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))
+		writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "waf_ip_blocked",
+			"waf ip-level block: upstream firewall is blocking the gateway IP for this realm, request rejected before contacting upstream; retry after the block window expires",
+			upstream.GatewayHint(upstream.ErrWafBlock, "", upstream.HintContext{}))
+		st.status = http.StatusServiceUnavailable
+		return
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
 
@@ -841,7 +863,7 @@ func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, si
 			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
 			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
 			// 加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
-			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
+			if kind == upstream.ErrWafBlock && h.wafIP.note(realm, acct.UID) {
 				break
 			}
 			if !rotateBackoff(i, r.Context()) {
@@ -943,7 +965,7 @@ func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, si
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
 		case upstream.ErrWafBlock:
-			if h.wafIP.active() {
+			if h.wafIP.active(realm) {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
 				// 轮转已止损、窗口过后自动解除。客户端提前重试无意义（换号不换 IP）；
 				// 有上游原文时原文优先（下方统一）。

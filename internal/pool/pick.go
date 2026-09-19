@@ -58,6 +58,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if !healthyOf(e) {
 			continue
 		}
+		if e.exhausted() {
+			continue // 已确认余额耗尽：选了必撞 402/14018（见 entry.exhausted）
+		}
 		if p.inFlightFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
 		}
@@ -207,6 +210,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
+		}
+		if e.exhausted() {
+			// 已确认余额耗尽（可能只吃了软冷却、未进 CoolHard）同样不参与兜底：
+			// 兜底的目的是「半开试探可能已恢复的号」，而已确认归零的号试探必失败
+			// （2026-09-19 日志的循环正是软冷却到期→兜底/正常选中→再撞 14018）。
+			continue
 		}
 		if p.inFlightFull(e) {
 			continue

@@ -294,8 +294,8 @@ func (p *Pool) AvailableUIDs() []string {
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !e.healthy(now) {
-			continue
+		if !e.usable(now) {
+			continue // usable = healthy 且未确认余额耗尽（见 entry.usable）
 		}
 		if p.inFlightFull(e) {
 			continue
@@ -315,8 +315,8 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !e.healthyForModel(now, model) {
-			continue
+		if !e.usableForModel(now, model) {
+			continue // 同 AvailableUIDs：耗尽号不进可用集合
 		}
 		if p.inFlightFull(e) {
 			continue
@@ -342,6 +342,9 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 	if !e.healthyForModel(now, model) {
 		return nil
 	}
+	if e.exhausted() {
+		return nil // 已确认余额耗尽：粘性命中也不放行（否则钉死在空号上反复撞 402）
+	}
 	if p.inFlightFull(e) {
 		return nil
 	}
@@ -361,6 +364,9 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	now := time.Now()
 	if !e.healthy(now) {
 		return nil
+	}
+	if e.exhausted() {
+		return nil // 已确认余额耗尽：同 PickByUIDForModel
 	}
 	if p.inFlightFull(e) {
 		return nil
@@ -434,7 +440,11 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
 		// 对触发模型不可用，对其他模型仍可选）。探活无请求模型上下文，取"存在可服务
 		// 模型"与 chat 实际可达性等价（issue #31 探活侧补齐）。
-		if e.healthy(now) || e.modelExempt() {
+		// 口径与 chat 实际可达性对齐：eligible 号（healthy 且未耗尽）可服务，
+		// 或账号处于模型级豁免形态（6004 单模型软冷却——对触发模型不可用，对其他
+		// 模型仍可选）。已确认余额耗尽的号不构成"可服务"（chat 会跳过它），
+		// 否则 /healthz 会报 200 而 chat 全池跳过返 503。
+		if e.usable(now) || (e.modelExempt() && !e.exhausted()) {
 			return true
 		}
 	}
