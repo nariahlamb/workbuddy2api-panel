@@ -51,6 +51,13 @@ func growthPending(t upstream.Task) bool {
 	if t.Claimed {
 		return false
 	}
+	// 上游锁定的任务不出待办：Sequential 族每日零点解锁一环，刚做完上一环时
+	// 下一环以下发但 locked 形态出现在列表里——扫进队列只会 accept 不落账报
+	// 失败（每日锁定窗口），零点解锁后自然回到待办。其余 locked（上游未开放）
+	// 同语义：不该被自动化尝试。
+	if t.Locked {
+		return false
+	}
 	if t.Target > 0 && t.Current >= t.Target {
 		return false // 达标未领：也入队（队列执行后会自动领）
 	}
@@ -97,6 +104,20 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 			} else {
 				for _, t := range tasks {
 					if growthPending(t) {
+						it.Growth = append(it.Growth, t)
+					}
+				}
+			}
+			// 小程序口径任务（school_season 校园日 / Sequential_Tasks_1 小程序首对话）
+			// 仅在 mp 头列表下发，与默认口径不重叠——合并进待办列表；mp 列表失败
+			// 静默（无 mp 任务的部署/活动结束时零影响）。
+			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+				seen := map[string]bool{}
+				for _, t := range it.Growth {
+					seen[t.TaskCode] = true
+				}
+				for _, t := range mpTasks {
+					if growthPending(t) && !seen[t.TaskCode] {
 						it.Growth = append(it.Growth, t)
 					}
 				}
@@ -215,6 +236,20 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 					for _, t := range tasks {
 						if growthPending(t) {
 							one.grow = append(one.grow, t)
+						}
+					}
+					// 合并小程序口径待办（与 tasksScanAll 同口径：mp 列表是默认口径
+					// 超集，按 code 去重；失败静默）。此前此处漏合并——扫描显示
+					// mp 待办而队列报"无可执行待办"。
+					if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+						seen := map[string]bool{}
+						for _, t := range one.grow {
+							seen[t.TaskCode] = true
+						}
+						for _, t := range mpTasks {
+							if growthPending(t) && !seen[t.TaskCode] {
+								one.grow = append(one.grow, t)
+							}
 						}
 					}
 					sort.Slice(one.grow, func(i, j int) bool { // 按 autoActions 顺序（依赖前置）
@@ -393,6 +428,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if act == nil {
 		return "", fmt.Errorf("任务 %s 无自动动作", code)
 	}
+	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
 	before, err := p.taskByCode(a, code)
 	if err != nil {
 		return "", err
@@ -400,6 +436,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if before == nil {
 		return "该账号无此任务", nil
 	}
+	isMP := isMPTaskCode(code)
 	if before.Claimed {
 		return "已完成（已领取）", nil
 	}
@@ -407,9 +444,21 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	after, _ := p.taskByCodeWaiting(a, code)
+	var after *upstream.Task
+	if isMP {
+		after, _ = p.taskByCodeMP(a, code)
+	} else {
+		after, _ = p.taskByCodeWaiting(a, code)
+	}
 	if after != nil && after.Claimable {
-		if credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, code); cerr == nil && (credit > 0 || energy > 0) {
+		var credit, energy int64
+		var cerr error
+		if isMP {
+			credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
+		} else {
+			credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, code)
+		}
+		if cerr == nil && (credit > 0 || energy > 0) {
 			msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
 		}
 	}
