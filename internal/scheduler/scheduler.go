@@ -424,7 +424,21 @@ func (s *Scheduler) RunKeepaliveNow() {
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
+// D4 门控：realm=global 账号无签到/活动体系，积分按月固定发放、不存在
+// 「签到恢复余额」路径，周期轮询既不产生新信息也徒增 WAF/风控暴露，
+// 自动路径（本方法）直接跳过；面板手动全量刷新走 RunBalanceRefreshNowIncludeGlobal。
 func (s *Scheduler) RunBalanceRefreshNow() {
+	s.runBalanceRefresh(false)
+}
+
+// RunBalanceRefreshNowIncludeGlobal 面板手动全量刷新入口：global 账号也一并查询
+// （人工触发、低频，用户明确要求看到最新余额）。
+func (s *Scheduler) RunBalanceRefreshNowIncludeGlobal() {
+	s.runBalanceRefresh(true)
+}
+
+// runBalanceRefresh 余额刷新主体；includeGlobal=false 时跳过 global realm 账号。
+func (s *Scheduler) runBalanceRefresh(includeGlobal bool) {
 	var wg sync.WaitGroup
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -432,6 +446,9 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil {
+			continue
+		}
+		if !includeGlobal && a.IsGlobal() {
 			continue
 		}
 		wg.Add(1)

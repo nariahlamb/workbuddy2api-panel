@@ -556,6 +556,7 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // balanceAll 手动全量刷新余额：并发查上游、写回池内 credits（含解冻语义），
+// 人工触发低频，global 账号也一并查询（区别于自动周期刷新的 D4 跳过）。
 // 完成后返回——面板紧接着拉 overview 即是最新值。账号量小（个位数），
 // 同步等待（上限受短 RPC 超时约束）比"触发后盲刷"体验更确定。
 func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
@@ -563,7 +564,7 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	p.cfg.Scheduler.RunBalanceRefreshNow()
+	p.cfg.Scheduler.RunBalanceRefreshNowIncludeGlobal()
 	log.Printf("panel: 手动全量余额刷新完成")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
 }

@@ -193,6 +193,7 @@ func hasKind(kinds []taskKind, k taskKind) bool {
 type fakeUpstream struct {
 	checkinCalls   atomic.Int32
 	refreshCalls   atomic.Int32
+	resourceCalls  atomic.Int32
 	resourceRemain int64
 }
 
@@ -203,6 +204,7 @@ func (f *fakeUpstream) server() *httptest.Server {
 			f.checkinCalls.Add(1)
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			f.resourceCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":100,"CycleCapacityRemain":` +
 				jsonI64(f.resourceRemain) + `,"CycleCapacityUsed":0}]}}}}`))
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
@@ -404,5 +406,49 @@ func TestRunBalanceRefreshNowUpdatesCreditsAndRevives(t *testing.T) {
 	// 禁用账号不参与：其 credits 保持 0（未被 UserResource 覆盖解冻）。
 	if st2, _ := p.Status("u2"); !st2.Disabled {
 		t.Errorf("u2 must stay disabled")
+	}
+}
+
+// TestRunBalanceRefreshSkipsGlobalAuto 自动周期刷新（RunBalanceRefreshNow）跳过
+// global realm 账号（D4 门控：global 积分按月固定发放，轮询无意义且徒增 WAF 暴露）；
+// 面板手动全量刷新（RunBalanceRefreshNowIncludeGlobal）仍查询 global 账号。
+func TestRunBalanceRefreshSkipsGlobalAuto(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 888}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "cn1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
+	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"})
+
+	up := &upstream.Client{
+		HTTP:              srv.Client(),
+		ChatBaseCN:        srv.URL,
+		BillingBaseCN:     srv.URL,
+		ChatBaseGlobal:    srv.URL,
+		BillingBaseGlobal: srv.URL,
+		GlobalEnabled:     true,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+
+	// 自动路径：global 不发起任何上游调用，credits 不被覆盖
+	s.RunBalanceRefreshNow()
+	if got := f.resourceCalls.Load(); got != 1 {
+		t.Errorf("auto refresh: want 1 resource call (cn only), got %d", got)
+	}
+	if st, _ := p.Status("cn1"); st.Credits != 888 {
+		t.Errorf("cn1 credits=%d want 888", st.Credits)
+	}
+	if st, _ := p.Status("g1"); st.Credits != 0 {
+		t.Errorf("g1 must stay untouched in auto path, credits=%d", st.Credits)
+	}
+
+	// 手动全量路径：global 也查询
+	s.RunBalanceRefreshNowIncludeGlobal()
+	if got := f.resourceCalls.Load(); got != 3 {
+		t.Errorf("manual refresh: want 3 total resource calls, got %d", got)
+	}
+	if st, _ := p.Status("g1"); st.Credits != 888 {
+		t.Errorf("g1 credits=%d want 888 after manual refresh", st.Credits)
 	}
 }
