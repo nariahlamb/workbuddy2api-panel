@@ -52,9 +52,10 @@ type Config struct {
 		BalanceRefreshMinutes int   `json:"balance_refresh_minutes"`
 	} `json:"schedule"`
 	Global struct {
-		Enabled     bool   `json:"enabled"`
-		ChatBase    string `json:"chat_base"`
-		BillingBase string `json:"billing_base"`
+		Enabled      bool   `json:"enabled"`
+		RelayEnabled bool   `json:"relay_enabled"`
+		ChatBase     string `json:"chat_base"`
+		BillingBase  string `json:"billing_base"`
 	} `json:"global"`
 	Upstream struct {
 		TimeoutSeconds       int    `json:"timeout_seconds"`
@@ -132,6 +133,7 @@ func Default() *Config {
 	c.Schedule.BalanceRefreshMinutes = 5
 	c.Upstream.TimeoutSeconds = 120
 	c.Global.Enabled = true
+	c.Global.RelayEnabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough"
 	c.Pool.MaxInFlight, c.Pool.MaxInFlightGlobal = 3, 2
@@ -267,6 +269,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
+		}
+	}
+	if v := os.Getenv("WB2A_GLOBAL_RELAY_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Global.RelayEnabled = b
 		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {

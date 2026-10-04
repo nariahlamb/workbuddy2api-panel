@@ -31,13 +31,14 @@ import (
 
 // Config 面板依赖（main 装配注入）。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
-	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	Pool               *pool.Pool
+	Upstream           *upstream.Client
+	Scheduler          *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
+	AuthDir            string               // OAuth 登录完成后凭证落盘目录
+	APIKey             string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	RedisMode          string               // "upstash" / "noop"，仅观测透出
+	Version            string               // 面板版本号（展示用）
+	GlobalRelayEnabled bool                 // global 中转开关（false = 仅静默任务）
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -128,6 +129,9 @@ func New(cfg Config) *Panel {
 	if cfg.RedisMode == "" {
 		cfg.RedisMode = "noop"
 	}
+	if !cfg.GlobalRelayEnabled {
+		cfg.GlobalRelayEnabled = true
+	}
 	p := &Panel{
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
@@ -209,6 +213,17 @@ func (p *Panel) apiKey() string {
 	return p.cfg.APIKey
 }
 
+// globalRelayEnabled 返回当前生效的 global 中转开关；Live 快照未显式携带时回退静态配置。
+func (p *Panel) globalRelayEnabled() bool {
+	if p.cfg.Live != nil {
+		snap := p.cfg.Live.Load()
+		if snap.GlobalRelayEnabled != nil {
+			return *snap.GlobalRelayEnabled
+		}
+	}
+	return p.cfg.GlobalRelayEnabled
+}
+
 // ---------------------------------------------------------------------------
 // 只读接口
 // ---------------------------------------------------------------------------
@@ -221,17 +236,18 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		sticky = p.cfg.StickyCount()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":         p.cfg.Version,
-		"uptime_sec":      int(time.Since(p.started).Seconds()),
-		"auth_required":   p.apiKey() != "",
-		"redis_mode":      p.cfg.RedisMode,
-		"sticky_sessions": sticky,
-		"total":           total,
-		"healthy":         healthy,
-		"cooling":         cooling,
-		"disabled":        disabled,
-		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		"version":              p.cfg.Version,
+		"uptime_sec":           int(time.Since(p.started).Seconds()),
+		"auth_required":        p.apiKey() != "",
+		"redis_mode":           p.cfg.RedisMode,
+		"sticky_sessions":      sticky,
+		"global_relay_enabled": p.globalRelayEnabled(),
+		"total":                total,
+		"healthy":              healthy,
+		"cooling":              cooling,
+		"disabled":             disabled,
+		"in_flight_full":       inFlightFull,
+		"accounts":             p.cfg.Pool.List(),
 	})
 }
 
@@ -248,19 +264,21 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// 各自独立成败——一个域失败（无号 / 上游错）不影响另一个域照常展示。
 	// realm 字段标在每条上，前端据此拆成国内/国外两个列表。
 	cnModels, cnErr := p.collectCNModels()
+	globalRelayEnabled := p.globalRelayEnabled()
 	globalModels, globalOK := p.collectGlobalModels()
-	if cnErr == errNoAccount && len(globalModels) == 0 {
+	if cnErr == errNoAccount && len(globalModels) == 0 && globalRelayEnabled {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"models":       cnModels,
-		"global":       globalModels,
-		"cn_error":     errString(cnErr),
-		"global_ok":    globalOK,
-		"cn_count":     len(cnModels),
-		"global_count": len(globalModels),
+		"ok":                   true,
+		"models":               cnModels,
+		"global":               globalModels,
+		"cn_error":             errString(cnErr),
+		"global_ok":            globalOK,
+		"global_relay_enabled": globalRelayEnabled,
+		"cn_count":             len(cnModels),
+		"global_count":         len(globalModels),
 	})
 }
 
@@ -298,6 +316,9 @@ func (p *Panel) collectCNModels() ([]map[string]any, error) {
 // collectGlobalModels 探测 global 域模型（无 global 账号 → 空列表 + false）。
 // 与 handler.modelList 的 global 分支共享同一份探测缓存，不二次打上游。
 func (p *Panel) collectGlobalModels() ([]map[string]any, bool) {
+	if !p.globalRelayEnabled() {
+		return nil, false
+	}
 	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
 		return nil, false
 	}

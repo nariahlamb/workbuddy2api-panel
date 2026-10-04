@@ -20,6 +20,7 @@ type Snapshot struct {
 	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权。全通配。
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
+	GlobalRelayEnabled   *bool         // 是否允许 global realm 参与中转；nil = 回退静态配置
 
 	// APIKeyCN / APIKeyGlobal realm 专用密钥（config.api_keys.cn / .global，可空）。
 	//

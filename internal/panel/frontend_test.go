@@ -90,3 +90,18 @@ func TestConfigViewRealmKeyFields(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigViewGlobalRelaySwitch 配置页必须提供 global 中转开关：
+// 关闭后国际版账号仍做静默任务，但不再对外提供 global: 模型与补全中转。
+func TestConfigViewGlobalRelaySwitch(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	for _, want := range []string{`name="global_relay_enabled"`, `国际版中转`, `仅静默任务`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("index.html missing %s (global 中转开关未生效)", want)
+		}
+	}
+}

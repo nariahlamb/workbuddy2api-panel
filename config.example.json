@@ -42,6 +42,7 @@
   },
   "global": {
     "enabled": true,
+    "relay_enabled": true,
     "chat_base": "",
     "billing_base": ""
   },

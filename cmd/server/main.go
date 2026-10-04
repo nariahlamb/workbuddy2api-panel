@@ -46,6 +46,8 @@ func stateSibling(stateFile, name string) string {
 	return filepath.Join(dir, name)
 }
 
+func boolptr(v bool) *bool { return &v }
+
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
 	flag.Parse()
@@ -220,6 +222,7 @@ func main() {
 		APIKeyGlobal:         cfg.APIKeys.Global,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
+		GlobalRelayEnabled:   boolptr(cfg.Global.RelayEnabled),
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -235,16 +238,17 @@ func main() {
 	// handler 必已就位）。
 	var chatHandler *server.Handler
 	pn := panel.New(panel.Config{
-		Pool:        p,
-		Usage:       rec,
-		Upstream:    up,
-		Scheduler:   sch,
-		AuthDir:     cfg.AuthDir,
-		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
-		Live:        live,
+		Pool:               p,
+		Usage:              rec,
+		Upstream:           up,
+		Scheduler:          sch,
+		AuthDir:            cfg.AuthDir,
+		APIKey:             cfg.APIKey,
+		RedisMode:          redisMode,
+		StickyCount:        sessCount,
+		Version:            appVersion,
+		GlobalRelayEnabled: cfg.Global.RelayEnabled,
+		Live:               live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -273,8 +277,9 @@ func main() {
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
-		GlobalEnabled: cfg.Global.Enabled,
-		MaxBodyBytes:  int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
+		GlobalEnabled:      cfg.Global.Enabled,
+		GlobalRelayEnabled: cfg.Global.RelayEnabled,
+		MaxBodyBytes:       int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
 	})
 	chatHandler = h
 
@@ -376,6 +381,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		APIKeyGlobal:         newCfg.APIKeys.Global,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
+		GlobalRelayEnabled:   boolptr(newCfg.Global.RelayEnabled),
 	})
 	up.SanitizeFingerprints = newCfg.Features.SanitizeBlacklistFingerprints
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)

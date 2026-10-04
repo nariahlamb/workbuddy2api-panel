@@ -62,6 +62,9 @@ type Config struct {
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+	// GlobalRelayEnabled global 中转开关：false 时保留 global 账号的静默任务/账单能力，
+	// 但对外不再提供 global: 模型与补全中转（给"先停掉 global 中转、任务照跑"场景用）。
+	GlobalRelayEnabled bool
 
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	// 在 recordAttempt 这一唯一汇聚点调用，因此流式/非流式、成功/失败都会计入，
@@ -78,6 +81,16 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		APIKey:       h.cfg.APIKey,
 		SoftCooldown: h.cfg.SoftCooldown,
 	}
+}
+
+// globalRelayEnabled 返回当前生效的 global 中转开关。Live 快照未显式携带时回退静态配置，
+// 避免旧测试/旧调用方仅热改 api_key 时被零值 false 意外关掉 global 中转。
+func (h *Handler) globalRelayEnabled() bool {
+	snap := h.loadLive()
+	if snap.GlobalRelayEnabled != nil {
+		return *snap.GlobalRelayEnabled
+	}
+	return h.cfg.GlobalRelayEnabled
 }
 
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
@@ -131,6 +144,9 @@ func (h *Handler) SetMaxBodyBytes(n int64) {
 func NewHandler(cfg Config) *Handler {
 	if cfg.MaxRotate <= 0 {
 		cfg.MaxRotate = 3
+	}
+	if !cfg.GlobalRelayEnabled {
+		cfg.GlobalRelayEnabled = true
 	}
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 600 * time.Second // 软限流基数（连续触发按指数退避放大）
@@ -373,7 +389,7 @@ func (h *Handler) modelList() []map[string]any {
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
 	// 名单 = 纯动态探测结果（fetchGlobalModels，失败/无号 → 空）。
-	if h.cfg.GlobalEnabled {
+	if h.cfg.GlobalEnabled && h.globalRelayEnabled() {
 		// global 域 effort 能力三级查找：探测下发桶（权威）→ 静态兜底表 → 省略。
 		// 先 fetchGlobalModels（内部探测并落 effort 桶），再按 id 取快照。
 		globalIDs, globalAccount := h.fetchGlobalModels()
@@ -552,6 +568,11 @@ func (h *Handler) chatCompletionsBody(w http.ResponseWriter, r *http.Request, si
 	if scope, ok := realmFrom(r); ok && !realmAllows(scope, realm) {
 		writeOpenAIError(w, http.StatusForbidden, "realm_not_allowed",
 			fmt.Sprintf("该 API key 仅限 %s 模型，请求的是 %s:%s", scope, realm, bareModel))
+		return
+	}
+	if realm == "global" && !h.globalRelayEnabled() {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "global_relay_disabled",
+			"global relay disabled by config (global.relay_enabled=false); scheduled tasks continue to run silently")
 		return
 	}
 

@@ -228,7 +228,10 @@ async function loadOverview(quiet) {
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
     const p = $('navPulse');
     p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
-    $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
+    const accNotes = [];
+    if (d.in_flight_full) accNotes.push(d.in_flight_full + ' 个账号在途占满');
+    if (d.global_relay_enabled === false) accNotes.push('国际版中转已停：仅静默任务，不接 global: 请求');
+    $('accNote').textContent = accNotes.join(' · ');
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
@@ -356,7 +359,10 @@ async function loadModels() {
     const probeOf = id => probes[id] || probes[probeKeys.find(k => k.endsWith(':' + id))];
 
     const nCN = renderModelRows(cn, probes, probeOf, tbCN, d.cn_error ? ('国内模型拉取失败：' + d.cn_error) : '上游未返回国内模型');
-    const nGL = renderModelRows(gl, probes, probeOf, tbGL, d.global_ok ? '上游未返回国际版模型' : '无国际版账号：请在「账号池」添加国际版账号后重试');
+    const glEmpty = d.global_relay_enabled === false
+      ? '国际版中转已停：仅静默任务，不展示 global 模型'
+      : (d.global_ok ? '上游未返回国际版模型' : '无国际版账号：请在「账号池」添加国际版账号后重试');
+    const nGL = renderModelRows(gl, probes, probeOf, tbGL, glEmpty);
 
     $('mdCNSummary').textContent = '国内 · ' + nCN + ' 个模型';
     $('mdGLSummary').textContent = '国际 · ' + nGL + ' 个模型';
@@ -408,6 +414,7 @@ $('btnLogPin').onclick = () => {
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'],
   api_keys_cn: ['api_keys', 'cn'], api_keys_global: ['api_keys', 'global'],
+  global_relay_enabled: ['global', 'relay_enabled'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
