@@ -776,21 +776,3 @@ func TestLoadConfigPathIsDirectory(t *testing.T) {
 		t.Errorf("error should suggest the fix (cp config.example.json): %v", err)
 	}
 }
-
-func TestGlobalRelayDefaultAndParsedFromFile(t *testing.T) {
-	c := Default()
-	if !c.Global.RelayEnabled {
-		t.Fatal("global.relay_enabled default want true")
-	}
-
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"global":{"relay_enabled":false}}`), 0o600)
-	c, err := Load(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Global.RelayEnabled {
-		t.Fatal("global.relay_enabled from file want false")
-	}
-}

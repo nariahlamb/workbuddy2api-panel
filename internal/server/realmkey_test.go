@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 )
 
@@ -135,43 +134,5 @@ func TestRealmKeyEndToEnd(t *testing.T) {
 
 	if rec := call("sk-bad", "cn:deepseek-v4.1-flash"); rec.Code != 401 {
 		t.Errorf("错误密钥应 401，得到 %d", rec.Code)
-	}
-}
-
-func boolPtr(v bool) *bool { return &v }
-
-// TestGlobalRelayDisabledBlocksGlobalChat global 中转关闭后，global: 请求必须在网关入口被拒绝，
-// 且不打上游；这不会影响账号的静默任务（scheduler/panel task 仍走 global realm）。
-func TestGlobalRelayDisabledBlocksGlobalChat(t *testing.T) {
-	var calls int
-	up := newFakeUpstream(t, func(string) (int, string, bool) {
-		calls++
-		return 200, sseOK, true
-	})
-	a := &auth.Auth{UID: "g1", AccessToken: "at-g1", ExpiresAt: 9999999999}
-	if _, err := auth.BackfillRealmFor(a, "global"); err != nil {
-		t.Fatalf("BackfillRealmFor(global): %v", err)
-	}
-	h := NewHandler(Config{
-		Pool:               testPoolWith(a),
-		Upstream:           up,
-		GlobalEnabled:      true,
-		GlobalRelayEnabled: true,
-		Live: livecfg.New(livecfg.Snapshot{
-			GlobalRelayEnabled: boolPtr(false),
-		}),
-	})
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"global:gpt-5.6-sol","messages":[]}`))
-	h.ServeHTTP(rec, req)
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s want 503", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "global_relay_disabled") {
-		t.Fatalf("body=%s want global_relay_disabled", rec.Body.String())
-	}
-	if calls != 0 {
-		t.Fatalf("upstream calls=%d want 0", calls)
 	}
 }

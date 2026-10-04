@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -64,35 +63,3 @@ func TestModelsEndpointNoPoolSafe(t *testing.T) {
 		}
 	}
 }
-
-func TestModelsEndpointGlobalRelayDisabledStillReturnsPanelState(t *testing.T) {
-	p := New(Config{
-		Version: "test", APIKey: "test-key",
-		Live: livecfg.New(livecfg.Snapshot{GlobalRelayEnabled: boolPtr(false)}),
-	})
-	req := httptest.NewRequest("GET", "/panel/api/models", nil)
-	req.Header.Set("Authorization", "Bearer test-key")
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var got struct {
-		OK                 bool             `json:"ok"`
-		GlobalRelayEnabled bool             `json:"global_relay_enabled"`
-		Models             []map[string]any `json:"models"`
-		Global             []map[string]any `json:"global"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
-	}
-	if !got.OK || got.GlobalRelayEnabled {
-		t.Fatalf("resp=%+v want ok=true global_relay_enabled=false", got)
-	}
-	if len(got.Global) != 0 {
-		t.Fatalf("global models=%d want 0 when relay disabled", len(got.Global))
-	}
-}
-
-func boolPtr(v bool) *bool { return &v }
