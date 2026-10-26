@@ -300,6 +300,28 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .savebar .grow { flex: 1; }
 .restart-note { color: var(--warn); font-size: 12.5px; }
 
+/* ── 重启待办横幅 ─────────────────────────────────────────────────── */
+.rbnr {
+  display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
+  padding: 9px 14px; border: 1px solid var(--warn); border-radius: 9px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  font-size: 12.5px; color: var(--warn);
+}
+.rbnr .grow { flex: 1; }
+
+/* ── 凭证弹窗 ─────────────────────────────────────────────────────── */
+.crmono { font: 11.5px var(--mono); color: var(--ink-3); word-break: break-all; }
+.crtbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+.crtbl th { text-align: left; font-weight: 550; color: var(--ink-3); font-size: 11.5px;
+  padding: 5px 6px; border-bottom: 1px solid var(--line-soft); }
+.crtbl td { padding: 6px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+.crtbl tr.pick td { cursor: pointer; }
+.crtbl tr.pick:hover td { background: var(--surface-2); }
+.crtbl .nm { font-weight: 600; }
+.crtbl .bad { color: var(--bad); font-size: 11.5px; }
+.crsec { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.crsec h4 { font-size: 13px; margin-bottom: 6px; }
+
 /* ── 弹层 ─────────────────────────────────────────────────────────── */
 .veil { position: fixed; inset: 0; background: rgba(6,8,13,.62); backdrop-filter: blur(2px); display: none; z-index: 60; }
 .veil.on { display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -452,7 +474,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <svg id="icoTheme" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
       </button>
       <button id="btnRefresh">刷新</button>
+      <button id="btnCreds" title="导入 / 导出凭证文件">凭证</button>
+      <button id="btnRestart" title="重启网关进程（改完需重启的配置免开关机）">重启</button>
       <button class="primary" id="btnAdd">添加账号</button>
+    </div>
+
+    <!-- 重启待办横幅：配置保存后有「需重启」字段时出现，点一下就走快速重启 -->
+    <div class="rbnr" id="restartBar" hidden>
+      <span id="restartBarTxt">有配置需重启才能生效</span>
+      <span class="grow"></span>
+      <button class="xs primary" id="btnRestartBar">立即重启</button>
+      <button class="xs ghost" id="btnRestartDismiss">稍后</button>
     </div>
 
     <!-- 账号池 -->
@@ -922,6 +954,36 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 凭证导入 / 导出 -->
+<div class="veil" id="credVeil">
+  <div class="dlg" style="width:640px">
+    <header>
+      <h3>凭证导入 / 导出</h3>
+      <div class="hint">交换目录：<span class="crmono" id="credDir">-</span> —— 把凭证 JSON 放进该目录即可导入；导出也写到这里。</div>
+    </header>
+    <div class="body">
+      <div class="crsec" style="margin-top:0;padding-top:0;border-top:none">
+        <h4>从目录导入 <span class="hint" style="font-size:11.5px;font-weight:400">点击行选择 / 取消，或直接「全部导入」</span></h4>
+        <div id="credImportList"><div class="state"><span class="dots">正在读取目录</span></div></div>
+        <div id="credImportMsg" class="state" hidden style="margin-top:8px"></div>
+      </div>
+
+      <div class="crsec">
+        <h4>导出账号凭证 <span class="hint" style="font-size:11.5px;font-weight:400">导出文件含完整 token，请自行妥善保管</span></h4>
+        <div id="credExportList"><div class="state"><span class="dots">正在加载账号</span></div></div>
+        <div id="credExportMsg" class="state" hidden style="margin-top:8px"></div>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnCredsReload">重新扫描</button>
+      <button id="btnCredsImportAll">全部导入</button>
+      <button class="primary" id="btnCredsImportSel">导入选中</button>
+      <button id="btnCredsClose">关闭</button>
     </footer>
   </div>
 </div>

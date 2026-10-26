@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,6 +48,16 @@ func stateSibling(stateFile, name string) string {
 }
 
 func boolptr(v bool) *bool { return &v }
+
+// envOr 读环境变量（去空白）；未设置时返回缺省值。
+// 面板的凭证交换目录与重启脚本都走 env：模块 runner.sh 可覆写，
+// 二进制本身保留 panel 内部常量作缺省，不强制部署方配置。
+func envOr(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
@@ -249,6 +260,10 @@ func main() {
 		Version:            appVersion,
 		GlobalRelayEnabled: cfg.Global.RelayEnabled,
 		Live:               live,
+		// 凭证导入/导出交换目录：模块部署落在手机 Download/wbauth（无 root 也能用
+		// 文件管理器拖进去）；非模块部署缺省交给 panel 内部常量（见 maintenance.go）。
+		ImportDir:     envOr("WB2A_IMPORT_DIR", ""),
+		RestartScript: envOr("WB2A_RESTART_SCRIPT", ""),
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),

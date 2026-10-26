@@ -205,6 +205,7 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' +
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
+        '<button class="xs ghost" data-a="export" data-u="' + esc(s.uid) + '">导出</button>' +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
   }).join('');
@@ -260,6 +261,10 @@ $('accBody').addEventListener('click', async ev => {
       toast('已禁用', 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
+    } else if (a === 'export') {
+      const r = await api('creds/export', { method: 'POST', body: JSON.stringify({ uids: [u] }) });
+      const row = (r.results || [])[0] || {};
+      toast(row.error ? '导出失败：' + row.error : '已导出到 ' + r.dir + '/' + row.file, row.error ? 'err' : 'ok');
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
@@ -550,7 +555,9 @@ $('cfgForm').onsubmit = async ev => {
   try {
     const r = await api('config', { method: 'POST', body: JSON.stringify(collectConfig()) });
     const n = (r.restart_required || []).length;
-    toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
+    toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效（点顶部「重启」即可，无需开关机）' : '配置已保存并立即生效', 'ok');
+    // 有需重启字段就常驻一条横幅，避免用户看完 toast 又忘了重启。
+    showRestartBar(r.restart_required);
     // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
     const k = $('cfgKey').value.trim();
     if (k) localStorage.setItem(LS_KEY, k);
@@ -1623,3 +1630,197 @@ async function loadPackages() {
 }
 
 if ($('btnPk')) $('btnPk').onclick = loadPackages;
+
+/* ── 快速重启 ─────────────────────────────────────────────────────
+   模块部署下改完「需重启」的配置不必开关机：
+   1. POST restart 让 restart.sh 整链重拉（先杀 supervisor 再拉，不走退避）；
+   2. 本进程随之消失，所以立刻改为「等 boot_id 变化」：旧 boot_id 记下，
+      轮询 overview 直到 boot_id 不同且 uptime 正常——只看 uptime 会误判；
+   3. 期间请求会断（连接拒绝），静默重试不报错。         */
+let restarting = false;
+
+function showRestartBar(fields) {
+  const bar = $('restartBar');
+  if (!fields || !fields.length) { bar.hidden = true; return; }
+  $('restartBarTxt').textContent = '配置已保存，但 ' + fields.length + ' 项需重启才生效：' + fields.join('、');
+  bar.hidden = false;
+}
+
+function markRestartingUI(on) {
+  restarting = on;
+  const b = $('btnRestart');
+  if (!b) return;
+  b.disabled = on;
+  b.textContent = on ? '重启中…' : '重启';
+}
+
+async function waitReboot(oldBootId) {
+  // 最多等 45 秒（restart.sh 宽限 6s + runner 启动 + 端口监听），超时提示看日志。
+  for (let i = 0; i < 90; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const d = await api('overview');
+      if (!d.boot_id || d.boot_id !== oldBootId) return d;
+    } catch (e) { /* 进程正在退出/重拉：连接错误属预期，继续等 */ }
+  }
+  return null;
+}
+
+async function doRestart() {
+  if (restarting) return;
+  if (!confirm('重启网关进程？\n\n现有连接会短暂中断（约 2~5 秒），账号池/状态不会丢。')) return;
+  let oldBootId = (overviewData && overviewData.boot_id) || null;
+  markRestartingUI(true);
+  let r;
+  try {
+    r = await api('restart', { method: 'POST' });
+  } catch (e) {
+    markRestartingUI(false);
+    toast('重启未发起：' + e.message, 'err');
+    return;
+  }
+  toast(r.hint || '正在重启…');
+  const d = await waitReboot(oldBootId);
+  markRestartingUI(false);
+  if (d) {
+    $('restartBar').hidden = true;
+    overviewData = d;
+    await loadOverview(true);
+    toast('已重启（当前进程已运行 ' + Math.floor(d.uptime_sec) + ' 秒）', 'ok');
+  } else {
+    toast('已发起重启，但 45 秒内未重连：请刷新页面或看「运行日志」', 'err');
+  }
+}
+
+if ($('btnRestart')) $('btnRestart').onclick = doRestart;
+if ($('btnRestartBar')) $('btnRestartBar').onclick = doRestart;
+if ($('btnRestartDismiss')) $('btnRestartDismiss').onclick = () => { $('restartBar').hidden = true; };
+
+/* ── 凭证导入 / 导出 ─────────────────────────────────────────────── */
+let credPick = new Set();      // 已勾选的待导入文件名
+let credFiles = [];            // 最近一次扫描结果
+
+function credMsg(which, text, cls) {
+  const el = $(which);
+  if (!el) return;
+  if (!text) { el.hidden = true; el.textContent = ''; return; }
+  el.hidden = false;
+  el.className = 'state' + (cls ? ' ' + cls : '');
+  el.textContent = text;
+}
+
+function renderImportList(d) {
+  credFiles = d.files || [];
+  $('credDir').textContent = d.dir || '—';
+  credPick = new Set([...credPick].filter(n => credFiles.some(f => f.name === n && !f.error)));
+  if (!credFiles.length) {
+    $('credImportList').innerHTML = '<div class="state">目录里没有 .json 凭证文件。把文件放进上面那个目录后点「重新扫描」。</div>';
+    return;
+  }
+  const rows = credFiles.map(f => {
+    const bad = !!f.error;
+    const pickd = credPick.has(f.name);
+    const tag = bad ? '<span class="tag bad">解析失败</span>'
+      : (f.in_pool ? '<span class="tag">已在池</span>' : '<span class="tag ok">可导入</span>');
+    return '<tr class="pick" data-name="' + esc(f.name) + '">' +
+      '<td style="width:22px">' + (bad ? '' : '<input type="checkbox"' + (pickd ? ' checked' : '') + ' tabindex="-1">') + '</td>' +
+      '<td><span class="nm">' + esc(f.nickname || f.uid || f.name) + '</span>' +
+        '<div class="crmono">' + esc(f.name) + (f.realm ? ' · ' + esc(f.realm === 'global' ? '国际版' : '国内版') : '') + '</div>' +
+        (bad ? '<div class="bad">' + esc(f.error) + '</div>' : '') + '</td>' +
+      '<td>' + tag + '</td></tr>';
+  }).join('');
+  $('credImportList').innerHTML = '<table class="crtbl"><thead><tr><th></th><th>文件 / 账号</th><th>状态</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  $('credImportList').querySelectorAll('tr.pick').forEach(tr => {
+    tr.onclick = () => {
+      const f = credFiles.find(x => x.name === tr.dataset.name);
+      if (!f || f.error) return;
+      if (credPick.has(f.name)) credPick.delete(f.name); else credPick.add(f.name);
+      renderImportList({ files: credFiles, dir: $('credDir').textContent });
+    };
+  });
+}
+
+function renderExportList() {
+  const list = (overviewData && overviewData.accounts) || [];
+  if (!list.length) {
+    $('credExportList').innerHTML = '<div class="state">账号池是空的，没有可导出的凭证。</div>';
+    return;
+  }
+  const rows = list.map(s =>
+    '<tr><td><span class="nm">' + esc(s.nickname || '未命名') + '</span>' +
+      '<div class="crmono">' + esc(s.uid) + (s.realm ? ' · ' + esc(s.realm === 'global' ? '国际版' : '国内版') : '') + '</div></td>' +
+    '<td style="text-align:right"><button class="xs ghost" data-exp="' + esc(s.uid) + '">导出此号</button></td></tr>'
+  ).join('');
+  $('credExportList').innerHTML = '<table class="crtbl"><tbody>' + rows + '</tbody></table>' +
+    '<div style="margin-top:10px;text-align:right"><button class="xs" id="btnExportAll">导出全部 ' + list.length + ' 个</button></div>';
+  $('credExportList').querySelectorAll('button[data-exp]').forEach(b => {
+    b.onclick = () => exportCreds({ uids: [b.dataset.exp] }, b);
+  });
+  if ($('btnExportAll')) $('btnExportAll').onclick = ev => exportCreds({ all: true }, ev.target);
+}
+
+async function loadCreds() {
+  $('credImportList').innerHTML = '<div class="state"><span class="dots">正在读取目录</span></div>';
+  try {
+    renderImportList(await api('creds/import'));
+  } catch (e) {
+    $('credImportList').innerHTML = '<div class="state err">读取失败：' + esc(e.message) + '</div>';
+  }
+  renderExportList();
+}
+
+function openCreds() {
+  $('credVeil').classList.add('on');
+  credMsg('credImportMsg', '');
+  credMsg('credExportMsg', '');
+  loadCreds();
+  if (!overviewData) loadOverview(true).then(renderExportList).catch(() => renderExportList());
+}
+
+async function runImport(names, btn) {
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '导入中…'; }
+  try {
+    const r = await api('creds/import', { method: 'POST', body: JSON.stringify({ names: names || [] }) });
+    const bad = (r.results || []).filter(x => !x.ok);
+    const okList = (r.results || []).filter(x => x.ok);
+    const msg = '导入 ' + r.imported + '/' + r.total + ' 份' +
+      (okList.length ? '：' + okList.map(x => (x.nickname || x.uid.slice(0, 8)) + (x.updated ? '（更新）' : '')).join('、') : '') +
+      (bad.length ? '；失败 ' + bad.length + ' 份（' + bad.map(x => x.name + ': ' + x.error).join('；') + '）' : '');
+    credMsg('credImportMsg', msg, r.imported > 0 ? 'ok' : 'err');
+    toast(r.imported > 0 ? '已导入 ' + r.imported + ' 个账号（免重启生效）' : '没有导入任何账号', r.imported > 0 ? 'ok' : 'err');
+    credPick.clear();
+    await loadOverview(true);
+    await loadCreds();
+  } catch (e) {
+    credMsg('credImportMsg', '导入失败：' + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+async function exportCreds(payload, btn) {
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '导出中…'; }
+  try {
+    const r = await api('creds/export', { method: 'POST', body: JSON.stringify(payload) });
+    const bad = (r.results || []).filter(x => x.error);
+    const files = (r.results || []).filter(x => x.file).map(x => x.file);
+    credMsg('credExportMsg', '导出 ' + r.exported + ' 份到 ' + r.dir + (files.length ? '：' + files.join('、') : '') +
+      (bad.length ? '；失败 ' + bad.length + ' 份' : ''), r.exported > 0 ? 'ok' : 'err');
+    toast(r.exported > 0 ? '已导出 ' + r.exported + ' 份凭证到 Download/wbauth' : '没有导出任何凭证', r.exported > 0 ? 'ok' : 'err');
+  } catch (e) {
+    credMsg('credExportMsg', '导出失败：' + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+if ($('btnCreds')) $('btnCreds').onclick = openCreds;
+if ($('btnCredsClose')) $('btnCredsClose').onclick = () => $('credVeil').classList.remove('on');
+if ($('btnCredsReload')) $('btnCredsReload').onclick = loadCreds;
+if ($('btnCredsImportAll')) $('btnCredsImportAll').onclick = ev => runImport([], ev.target);
+if ($('btnCredsImportSel')) $('btnCredsImportSel').onclick = ev => {
+  if (!credPick.size) { toast('先点选要导入的文件', 'err'); return; }
+  runImport([...credPick], ev.target);
+};
