@@ -62,6 +62,14 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// ImportDir 凭证导入/导出的交换目录（手机公共目录）。
+	// 空 = 缺省 /storage/emulated/0/Download/wbauth（见 maintenance.go）。
+	ImportDir string
+
+	// RestartScript 快速重启脚本路径（模块目录下的 restart.sh）。
+	// 空 = 缺省 /data/adb/modules/workbuddy2api/restart.sh；脚本不存在时重启接口返回 501。
+	RestartScript string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -76,6 +84,9 @@ type Panel struct {
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
 	loginMu sync.Mutex
 	logins  map[string]loginSession
+
+	// maintenanceMu 串行化凭证导入/导出，避免两个请求同时写同一 FilePath.tmp。
+	maintenanceMu sync.Mutex
 
 	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
 	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
@@ -181,6 +192,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
+	p.mux.HandleFunc("POST /panel/api/restart", p.withAuth(p.restart))
+	p.mux.HandleFunc("GET /panel/api/creds/import", p.withAuth(p.credsImportList))
+	p.mux.HandleFunc("POST /panel/api/creds/import", p.withAuth(p.credsImport))
+	p.mux.HandleFunc("POST /panel/api/creds/export", p.withAuth(p.credsExport))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 }
@@ -236,7 +251,10 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		sticky = p.cfg.StickyCount()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":              p.cfg.Version,
+		"version": p.cfg.Version,
+		// boot_id 供前端判定「进程真的换了一条」：uptime 有 1 秒粒度，重启后
+		// 前一两秒仍是 0，只看 uptime 会误判成同一个进程。
+		"boot_id":              p.started.UnixNano(),
 		"uptime_sec":           int(time.Since(p.started).Seconds()),
 		"auth_required":        p.apiKey() != "",
 		"redis_mode":           p.cfg.RedisMode,

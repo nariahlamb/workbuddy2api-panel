@@ -3,7 +3,7 @@ name: Build Android Magisk module
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
     tags: ['v*']
     paths:
       - '**.go'
